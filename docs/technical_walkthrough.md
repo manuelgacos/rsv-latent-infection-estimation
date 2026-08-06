@@ -62,7 +62,7 @@ where $\beta$ is the vector of infection-age spline coefficients.
 Within each day, seasonal circulation and the infection-age curve determine the conditional infection probability:
 
 $$
-\pi_i(a) = 1-\exp\left\{-\lambda_i(a)w(a;\beta)\right\}.
+\pi_i(a) = 1-\exp\left(-\lambda_i(a)w(a;\beta)\right).
 $$
 
 This is the probability of infection during day $a$, conditional on remaining uninfected through day $a-1$.
