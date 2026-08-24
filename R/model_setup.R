@@ -215,9 +215,6 @@ make_sim_model_lambda_custom <- function(lambda_global,
 # Spline basis construction -----------------------------------------------
 
 
-# Spline basis construction -----------------------------------------------
-
-
 #' Construct day-integrated spline bases for RSV simulations
 #'
 #' Builds the spline basis matrices used to represent the infection-age curve,
@@ -548,31 +545,42 @@ build_B_day_from_spline <- function(knots,
 }
 
 
-#' Construct the RSV model object
+#' Construct an RSV model object
 #'
-#' This function validates and packages the global, precomputed components of
-#' the RSV model into a standardized container for use in the likelihood and
-#' related computations. The resulting object is intended to be treated as
-#' read-only in downstream code.
+#' Validates and combines the spline basis matrices, cumulative-kernel basis,
+#' and calendar-time RSV circulation curve into the model object used
+#' throughout the probability, likelihood, estimation, and simulation
+#' workflow.
 #'
-#' @param B_day Matrix or array containing the basis for the infection-age
-#'   density \eqn{w(a; \beta)} evaluated on the age (day) grid.
+#' @param B_day Numeric `J x D` matrix or array containing the daily basis for
+#'   the infection-age curve `w(a)`.
+#' @param S_day Numeric `K x D` matrix or array containing the daily basis for
+#'   the healthcare-visit curve `c(a)`.
+#' @param phi Numeric `J x D` matrix containing the day-integrated
+#'   infection-age basis used to construct subject-specific cumulative kernels.
+#' @param lambda_global Numeric vector containing the RSV circulation curve
+#'   \eqn{\lambda(t)} on the full calendar-time grid.
 #'
-#' @param S_day Matrix or array containing the basis for the detection function
-#'   \eqn{c(a; \eta)} evaluated on the same age (day) grid.
+#' @return An `rsv_model` object containing:
+#' \describe{
+#'   \item{\code{B_day}}{Numeric `J x D` matrix or array containing the
+#'     infection-age basis.}
+#'   \item{\code{S_day}}{Numeric `K x D` matrix or array containing the
+#'     healthcare-visit basis.}
+#'   \item{\code{phi}}{Numeric `J x D` matrix containing the day-integrated
+#'     infection-age basis used in cumulative-kernel calculations.}
+#'   \item{\code{lambda_global}}{Numeric vector containing the calendar-time
+#'     RSV circulation curve.}
+#' }
 #'
-#' @param phi Numeric matrix of precomputed quantities (e.g., day-averaged
-#'   contributions) used in the likelihood. Its dimensions should be consistent
-#'   with the basis for \eqn{w(a; \beta)} and the age grid.
-#'
-#' @param lambda_global Numeric vector giving the calendar-time circulation
-#'   function \eqn{\lambda(t)} over the full calendar window of interest.
-#'
-#' @return An object of class \code{"rsv_model"}.
-#'
+#' @details
+#' `B_day`, `S_day`, and `phi` must have the same number of columns so that
+#' they represent the same age grid. `phi` must also have the same number of
+#' rows as `B_day` because both use the same `J` infection-age basis
+#' functions.
 make_rsv_model <- function(B_day, S_day, phi, lambda_global) {
   
-  # ---- Basic type checks ----------------------------------------------------
+  # ---- Input validation ----------------------------------------------------
   
   if (!is.matrix(B_day) && !is.array(B_day)) {
     stop("`B_day` must be a matrix or array.")
@@ -599,7 +607,7 @@ make_rsv_model <- function(B_day, S_day, phi, lambda_global) {
     stop("`lambda_global` must be a numeric vector.")
   }
   
-  # ---- Non-trivial sizes ----------------------------------------------------
+  # ---- Validate dimensions -------------------------------------------------
   
   if (nrow(B_day) == 0L || ncol(B_day) == 0L) {
     stop("`B_day` must have positive numbers of rows and columns.")
@@ -611,9 +619,8 @@ make_rsv_model <- function(B_day, S_day, phi, lambda_global) {
     stop("`phi` must have positive numbers of rows and columns.")
   }
   
-  # ---- Dimension consistency checks ----------------------------------------
+  # ---- Dimension consistency -----------------------------------------------
   
-  # Same age grid (columns) for B_day, S_day, and phi
   if (ncol(B_day) != ncol(S_day)) {
     stop("`B_day` and `S_day` must have the same number of columns (same age grid).")
   }
@@ -621,12 +628,11 @@ make_rsv_model <- function(B_day, S_day, phi, lambda_global) {
     stop("`B_day` and `phi` must have the same number of columns (same age grid).")
   }
   
-  # Same number of basis functions for w in B_day and phi
   if (nrow(phi) != nrow(B_day)) {
     stop("`phi` must have the same number of rows as `B_day` (same J basis functions).")
   }
   
-  # ---- Sanity checks on numeric contents -----------------------------------
+  # ---- Validate numeric contents -------------------------------------------
   
   if (any(!is.finite(lambda_global))) {
     stop("`lambda_global` contains non-finite values (NA, NaN, or Inf).")
@@ -636,7 +642,7 @@ make_rsv_model <- function(B_day, S_day, phi, lambda_global) {
     stop("`phi` contains non-finite values (NA, NaN, or Inf).")
   }
   
-  # ---- Create the rsv_model object -----------------------------------------
+  # ---- Construct model object ----------------------------------------------
   
   out <- list(
     B_day         = B_day,
@@ -650,32 +656,36 @@ make_rsv_model <- function(B_day, S_day, phi, lambda_global) {
 }
 
 
-#' Construct second-difference penalty matrix
+#' Construct a second-difference matrix
 #'
-#' Creates the discrete second-difference matrix D of size (p-2) x p.
-#' For a parameter vector theta of length p, D %*% theta yields
-#' the vector of second differences:
+#' Constructs the discrete second-difference matrix used to penalize roughness
+#' in spline coefficient vectors. For a coefficient vector \eqn{\theta} of
+#' length \eqn{p}, the product \eqn{D\theta} contains the second differences
 #'
-#'   theta_{j+2} - 2*theta_{j+1} + theta_j
+#' \deqn{
+#'   \theta_{j+2} - 2\theta_{j+1} + \theta_j,
+#'   \qquad j = 1,\ldots,p-2.
+#' }
 #'
-#' for j = 1, ..., p-2.
+#' @param p Integer scalar giving the length of the coefficient vector. It must
+#'   be at least 3.
 #'
-#' This matrix is typically used to define a quadratic roughness penalty
+#' @return Numeric `(p - 2) x p` matrix whose rows contain the
+#'   second-difference pattern \eqn{(1,-2,1)}.
 #'
-#'   (alpha / 2) * || D theta ||^2
+#' @details
+#' If \eqn{M = D^\top D}, then the quadratic roughness penalty can be written as
 #'
-#' @param p Integer >= 3. Length of the parameter vector.
+#' \deqn{
+#'   \frac{\alpha}{2}\theta^\top M\theta
+#'   =
+#'   \frac{\alpha}{2}\lVert D\theta\rVert^2.
+#' }
 #'
-#' @return A dense numeric matrix of dimension (p-2) x p.
-#'
-#' @examples
-#' D <- make_D2(6)
-#' theta <- 1:6
-#' D %*% theta  # should be zero (linear function)
-#'
-#' @export
+#' This penalty discourages large changes in successive coefficient slopes and
+#' therefore favors smoother spline curves.
 make_D2 <- function(p) {
-  # ---- checks ----
+  # ---- Input validation ----------------------------------------------------
   if (!is.numeric(p) || length(p) != 1L || !is.finite(p)) {
     stop("p must be a single finite numeric value.")
   }
@@ -686,10 +696,9 @@ make_D2 <- function(p) {
     stop("Second-difference penalty requires p >= 3.")
   }
   
-  # ---- allocate matrix ----
   D <- matrix(0.0, nrow = p - 2L, ncol = p)
   
-  # ---- fill 1, -2, 1 pattern ----
+  # Fill each row with the second-difference pattern (1, -2, 1).
   for (i in seq_len(p - 2L)) {
     D[i, i]     <-  1.0
     D[i, i + 1] <- -2.0
@@ -700,6 +709,46 @@ make_D2 <- function(p) {
 }
 
 
+# Simulation truth construction -------------------------------------------
+
+
+#' Project target curves onto the model spline bases
+#'
+#' Approximates target infection-age and healthcare-visit curves using the
+#' spline bases stored in an `rsv_model` object. The resulting nonnegative
+#' coefficients and reconstructed curves define the simulation truth used in
+#' the reference workflow.
+#'
+#' @param model An `rsv_model` object containing `B_day` and `S_day`.
+#' @param w_target Nonnegative numeric vector of length `days` containing the
+#'   target infection-age curve.
+#' @param c_target Nonnegative numeric vector of length `days` containing the
+#'   target healthcare-visit curve.
+#' @param days Positive integer scalar giving the age-grid length.
+#' @param normalize Logical scalar indicating whether the target and
+#'   reconstructed curves should be normalized to sum to one.
+#' @param opt_maxit Positive integer scalar giving the maximum number of
+#'   optimization iterations.
+#'
+#' @return A named list containing:
+#' \describe{
+#'   \item{\code{beta_true}}{Nonnegative infection-age spline coefficients.}
+#'   \item{\code{eta_true}}{Nonnegative healthcare-visit spline coefficients.}
+#'   \item{\code{w_true}}{Model-represented infection-age curve.}
+#'   \item{\code{c_true}}{Model-represented healthcare-visit curve.}
+#'   \item{\code{w_target}}{Target infection-age curve used for projection.}
+#'   \item{\code{c_target}}{Target healthcare-visit curve used for projection.}
+#'   \item{\code{optim_w}}{Optimization result for the infection-age curve.}
+#'   \item{\code{optim_c}}{Optimization result for the healthcare-visit curve.}
+#'   \item{\code{normalize}}{Logical scalar indicating whether normalization
+#'     was applied.}
+#'   \item{\code{days}}{Integer scalar giving the age-grid length.}
+#' }
+#'
+#' @details
+#' Each target is approximated by constrained least squares with nonnegative
+#' spline coefficients. The returned `w_true` and `c_true` are the resulting
+#' model-represented curves and may differ slightly from the supplied targets.
 fit_true_curves <- function(model,
                             w_target,
                             c_target,
@@ -742,7 +791,7 @@ fit_true_curves <- function(model,
     stop("fit_true_curves: w_target and c_target must be nonnegative.")
   }
   
-  # ---- Optional normalization of targets ----------------------------------
+  # ---- Normalize targets ---------------------------------------------------
   if (normalize) {
     sw <- sum(w_target)
     sc <- sum(c_target)
@@ -753,9 +802,9 @@ fit_true_curves <- function(model,
     c_target <- c_target / sc
   }
   
-  # ---- Setup least-squares problems ---------------------------------------
-  X_w <- t(B_day)  # days x J
-  X_c <- t(S_day)  # days x K
+  # ---- Setup least-squares projections ------------------------------------
+  X_w <- t(B_day)
+  X_c <- t(S_day)
   
   obj_w <- function(beta) {
     r <- as.numeric(X_w %*% beta - w_target)
@@ -766,14 +815,14 @@ fit_true_curves <- function(model,
     sum(r * r)
   }
   
-  # ---- Initial values (projected LS) --------------------------------------
+  # ---- Construct initial values --------------------------------------------
   beta_init <- pmax(as.numeric(qr.solve(X_w, w_target)), 0)
   eta_init  <- pmax(as.numeric(qr.solve(X_c, c_target)), 0)
   
   if (sum(beta_init) == 0) beta_init <- rep(1e-8, nrow(B_day))
   if (sum(eta_init)  == 0) eta_init  <- rep(1e-8, nrow(S_day))
   
-  # ---- Optimization -------------------------------------------------------
+  # ---- Constrained optimization --------------------------------------------
   opt_w <- optim(
     par     = beta_init,
     fn      = obj_w,
@@ -792,7 +841,7 @@ fit_true_curves <- function(model,
   beta0 <- as.numeric(opt_w$par)
   eta0  <- as.numeric(opt_c$par)
   
-  # ---- Reconstruct curves -------------------------------------------------
+  # ---- Reconstruct model curves --------------------------------------------
   w_basis <- as.numeric(crossprod(beta0, B_day))
   c_basis <- as.numeric(crossprod(eta0,  S_day))
   
