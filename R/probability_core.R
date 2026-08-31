@@ -1,56 +1,40 @@
-#' Subject-level precomputations for RSV model
+# Probability core
+#
+# Implements the subject-level precomputations and probability calculations
+# connecting seasonal RSV circulation, first-infection timing, and healthcare visits.
+
+#' Compute subject-level RSV precomputations
 #'
-#' For a given subject \code{subject_i}, this function computes the quantities
-#' that depend on the subject and the global model, but do NOT depend on the
-#' parameter vectors \code{beta} or \code{eta}. These precomputations can be
-#' reused across all evaluations of that subject's contribution to the
-#' log-likelihood (e.g., for different values of \code{beta}, \code{eta}).
+#' Computes the subject-specific quantities that depend on birth timing and the
+#' model but not on the infection-age or healthcare-visit spline coefficients.
+#' These quantities are reused across likelihood and estimation evaluations.
 #'
-#' Specifically, this function returns:
-#' \itemize{
-#'   \item \code{lambda_i} – the subject-shifted calendar-time circulation
-#'         curve evaluated on the age grid, i.e.
-#'         \eqn{\lambda_i[m] = \lambda(m + B_i)} for \eqn{m = 1,\dots,\text{age\_len}},
-#'         where \eqn{B_i} is \code{subject_i$birth_index}.
+#' @param subject_i A subject record containing `birth_index`, the 1-based
+#'   calendar index used to align the seasonal RSV circulation curve with the
+#'   subject's age.
+#' @param model An `rsv_model` object containing the daily infection-age basis
+#'   `B_day`, integrated basis `phi`, and seasonal RSV circulation curve
+#'   `lambda_global`.
+#' @param control An `rsv_control` object created by `make_rsv_control()`,
+#'   controlling calendar-index bound checks and clipping behavior.
 #'
-#'   \item \code{V_i} – the J x 366 cumulative kernel matrix for subject i,
-#'         with columns
-#'         \eqn{V_i[, 1] = v_i(0) = 0} and
-#'         \eqn{V_i[, d + 1] = v_i(d)} for \eqn{d = 1,\dots,365}, as computed
-#'         by \code{v_i(lambda_i, phi)} using the precomputed \code{phi}
-#'         matrix from the model.
+#' @return A named list of subject-level precomputations containing:
+#' \describe{
+#'   \item{\code{lambda_i}}{Numeric vector of length 365 containing the
+#'     subject-specific RSV circulation curve over ages 1 through 365 days.}
+#'   \item{\code{V_i}}{Numeric \code{J x 366} matrix containing the cumulative
+#'     subject-level kernels. Column 1 represents day zero, and column
+#'     \code{d + 1} represents \eqn{v_i(d)} for days 1 through 365.}
 #' }
 #'
-#' This helper does not depend on \code{beta} or \code{eta}; those parameter
-#' vectors enter later through the global precomputations (w_vec, c_vec) and
-#' the per-subject likelihood branches.
-#'
-#' @param subject_i A single subject object, typically created by
-#'   \code{make_subject()}, containing at least the fields
-#'   \code{birth_index}, \code{visit_age}, and \code{weight}.
-#'
-#' @param model An \code{"rsv_model"} object created by \code{make_rsv_model()},
-#'   which must contain numeric components \code{phi} (J x 365) and
-#'   \code{lambda_global} (numeric vector of calendar-time circulation values).
-#'
-#' @param control An \code{"rsv_control"} object created by
-#'   \code{make_rsv_control()}. Its fields \code{check_bounds} and
-#'   \code{warn_on_clip} are passed to \code{lambda_shift_i()} to control
-#'   how out-of-bounds calendar indices are handled.
-#'
-#' @return A list with components:
-#'   \itemize{
-#'     \item \code{lambda_i} – numeric vector of length equal to the age grid
-#'           (typically 365), containing the subject-shifted circulation curve.
-#'     \item \code{V_i}      – numeric J x 366 matrix of cumulative kernels for
-#'           this subject, as returned by \code{v_i(lambda_i, model$phi)}.
-#'   }
-#'
-#' @export
+#' @details
+#' The subject-specific circulation curve is obtained by shifting
+#' \eqn{\lambda(t)} according to `subject_i$birth_index`. The cumulative kernel
+#' matrix is then computed from `lambda_i` and `model$phi`. Neither returned
+#' quantity depends on \eqn{\beta} or \eqn{\eta}.
 rsv_precompute_subject <- function(subject_i,
                                    model,
                                    control = make_rsv_control()) {
-  # ---- Basic checks on inputs ----------------------------------------------
   if (!is.list(subject_i)) {
     stop("`subject_i` must be a list (typically from make_subject()).")
   }
@@ -60,8 +44,6 @@ rsv_precompute_subject <- function(subject_i,
   if (!inherits(control, "rsv_control") && !is.list(control)) {
     stop("`control` must be an 'rsv_control' object (from make_rsv_control()).")
   }
-  
-  # Ensure required model components exist
   if (is.null(model$phi)) {
     stop("model$phi is missing; it must be provided in the rsv_model object.")
   }
@@ -78,11 +60,9 @@ rsv_precompute_subject <- function(subject_i,
     stop(sprintf("model$phi must have 365 columns (found %d).", ncol(phi)))
   }
   
-  # ---- Subject-specific shifted lambda -------------------------------------
-  # Uses existing helper: lambda_shift_i(subject_i, model, control)
+  # Construct the subject-specific circulation curve.
   lambda_i <- lambda_shift_i(subject_i, model, control)
   
-  # Check length consistency with phi's age grid
   if (!is.numeric(lambda_i)) {
     stop("lambda_shift_i() must return a numeric vector.")
   }
@@ -93,8 +73,7 @@ rsv_precompute_subject <- function(subject_i,
     ))
   }
   
-  # ---- Subject-specific cumulative kernel V_i ------------------------------
-  # Uses existing helper: v_i(lambda_i, phi)
+  # Construct the subject-specific cumulative kernel.
   V_i <- v_i(lambda_i, phi)
   
   if (!is.matrix(V_i) || !is.numeric(V_i)) {
@@ -107,7 +86,6 @@ rsv_precompute_subject <- function(subject_i,
     ))
   }
   
-  # ---- Return subject-level precomputations --------------------------------
   list(
     lambda_i = lambda_i,
     V_i      = V_i
@@ -115,73 +93,45 @@ rsv_precompute_subject <- function(subject_i,
 }
 
 
-#' Subject-specific calendar-time shift of the circulation curve
+#' Construct the subject-specific RSV circulation curve
 #'
-#' @description
-#' Returns the subject-specific circulation vector \eqn{\lambda_i(a)} on the
-#' *age* grid \eqn{a = 1,\dots,A}, where \eqn{A = ncol(model$B_day)} is the
-#' modeled age-window length (typically 365 days).
+#' Aligns the seasonal RSV circulation curve \eqn{\lambda(t)} with a subject's
+#' age using the subject's birth index.
 #'
-#' For a subject with birth index \eqn{B_i}, the calendar day corresponding to
-#' age \eqn{a} is \eqn{t = B_i + a}. This function therefore maps the age grid
-#' to calendar indices \code{cal_idx = B_i + (1:A)} and returns
-#' \code{model$lambda_global[cal_idx]}.
+#' @param subject_i A subject record containing `birth_index`, the 1-based
+#'   calendar index corresponding to the subject's birth date.
+#' @param model An `rsv_model` object containing the seasonal RSV circulation
+#'   curve `lambda_global` and the daily age basis `B_day`.
+#' @param control An `rsv_control` object controlling calendar-index bound
+#'   checks and clipping behavior.
+#'
+#' @return Numeric vector of length 365 containing the subject-specific RSV
+#'   circulation values over ages 1 through 365 days.
 #'
 #' @details
-#' **Indexing convention (important):**
-#' \itemize{
-#'   \item \code{subject_i$birth_index = B_i} is a 1-based calendar index.
-#'   \item \code{age_grid = 1:A} represents ages (in days) from day 1 through day A.
-#'   \item The corresponding calendar indices are \code{B_i + 1, ..., B_i + A}.
+#' For birth index \eqn{B_i} and age \eqn{a}, the subject-specific circulation
+#' curve is
+#' \deqn{
+#'   \lambda_i(a) = \lambda(B_i + a).
 #' }
+#' Thus, ages 1 through 365 correspond to calendar indices
+#' `B_i + 1` through `B_i + 365`.
 #'
-#' **Bounds behavior:**
-#' \itemize{
-#'   \item If \code{control$check_bounds = TRUE}, the function errors if any
-#'   computed calendar index is outside \code{1:length(lambda_global)}.
-#'   \item Otherwise, the function clips indices to the valid range, optionally
-#'   warning if \code{control$warn_on_clip = TRUE}.
-#' }
-#'
-#' @param subject_i A single subject object (from \code{make_subject()}) with
-#'   at least \code{birth_index} (integer, 1-based calendar index).
-#'
-#' @param model An \code{"rsv_model"} object containing:
-#'   \itemize{
-#'     \item \code{lambda_global}: numeric vector giving \eqn{\lambda(t)} on the
-#'           calendar grid, and
-#'     \item \code{B_day}: a matrix whose number of columns defines the age
-#'           window length \eqn{A} used here.
-#'   }
-#'
-#' @param control An \code{"rsv_control"} object (or compatible list) containing
-#'   at least \code{check_bounds} and \code{warn_on_clip}.
-#'
-#' @return A numeric vector of length \eqn{A = ncol(model$B_day)} giving the
-#'   subject-shifted circulation values \eqn{\lambda_i(1),\dots,\lambda_i(A)}.
-#'
-#' @examples
-#' \dontrun{
-#' # If birth_index = 1 and A = 365, calendar indices are 2:366
-#' lambda_i <- lambda_shift_i(subject_i, model, control)
-#' length(lambda_i)  # 365
-#' }
-#'
-#' @export
+#' If a shifted calendar index falls outside `lambda_global`, strict mode
+#' produces an error. Otherwise, the index is clipped to the available
+#' calendar range, with an optional warning.
 lambda_shift_i <- function(subject_i, model, control) {
   
-  # Extract birth index and global lambda
   B_i <- subject_i$birth_index
   lambda_global <- model$lambda_global
   
-  # Age grid length: inferred from B_day columns (assumed already validated)
+  # Infer the modeled age window from the daily basis.
   age_len  <- ncol(model$B_day)
   age_grid <- seq_len(age_len)
   
-  # Calendar indices corresponding to ages 1:age_len
+  # Map ages 1:age_len to calendar indices B_i + 1 through B_i + age_len.
   cal_idx <- B_i + age_grid
   
-  # Bounds check only if requested
   if (control$check_bounds) {
     L <- length(lambda_global)
     if (any(cal_idx < 1L | cal_idx > L)) {
@@ -191,7 +141,7 @@ lambda_shift_i <- function(subject_i, model, control) {
       ))
     }
   } else {
-    # Lenient mode: clip with optional warning
+    # In lenient mode, clip out-of-range calendar indices.
     L <- length(lambda_global)
     too_low  <- cal_idx < 1L
     too_high <- cal_idx > L
@@ -207,34 +157,30 @@ lambda_shift_i <- function(subject_i, model, control) {
 }
 
 
-#' Subject cumulative accumulator v_i(d)
+#' Compute the subject-specific cumulative kernel
 #'
-#' Computes the J x 366 cumulative matrix \eqn{V} for a single subject i, where
-#' \eqn{V[, 0] = 0} and \eqn{V[, d] = \sum_{m = 1}^{d} \lambda_{\text{shift}, i}[m] \cdot \phi[, m]}
-#' for days \eqn{d = 1, \ldots, 365}. This matches Eqs. (vi_def, vi_element).
+#' Computes the cumulative kernel \eqn{v_i(d)} from the subject-specific RSV
+#' circulation curve and the integrated infection-age spline basis.
 #'
-#' @param lambda_shift_i Numeric length-365 vector with subject-shifted day
-#'   intensities \eqn{\lambda(m + B_i)} for \eqn{m = 1, \ldots, 365}.
-#' @param phi Numeric J x 365 matrix whose m-th column is \eqn{\phi(m)} (already
-#'   precomputed from your stepwise B-spline basis with eval_rule = "integral").
+#' @param lambda_shift_i Numeric vector of length 365 containing the
+#'   subject-specific RSV circulation values over ages 1 through 365 days.
+#' @param phi Numeric `J x 365` matrix containing the integrated infection-age
+#'   spline basis, where column \eqn{m} corresponds to age day \eqn{m}.
 #'
-#' @return Numeric J x 366 matrix \code{V}, where column 1 is \eqn{d = 0} (all zeros),
-#'   and column \code{d+1} equals \eqn{v_i(d)} for day \eqn{d = 1, \ldots, 365}.
+#' @return Numeric `J x 366` matrix containing the cumulative kernels.
+#'   Column 1 represents \eqn{v_i(0) = 0}, and column `d + 1` represents
+#'   \eqn{v_i(d)} for days 1 through 365.
 #'
 #' @details
-#' Fast path:
-#' \itemize{
-#'   \item Form \eqn{A_i = \phi \odot \lambda_{\text{shift}, i}} by column scaling:
-#'     \code{A <- sweep(phi, 2L, lambda_shift_i, "*")}.
-#'   \item Cumulative sum along columns to get \eqn{V[, d]} in a single pass.
+#' For age day \eqn{d},
+#' \deqn{
+#'   v_i(d)
+#'   =
+#'   \sum_{m=1}^{d} \lambda_i(m)\phi(m).
 #' }
-#'
-#' Validation identity (useful in tests):
-#' \deqn{V[, d] - V[, d-1] = \lambda_{\text{shift}, i}[d] \cdot \phi[, d].}
-#'
-#' @export
+#' The additional first column preserves the day-zero value needed by
+#' downstream survival and likelihood calculations.
 v_i <- function(lambda_shift_i, phi) {
-  # --- Shape checks ---
   if (!is.numeric(lambda_shift_i) || length(lambda_shift_i) != 365L) {
     stop("lambda_shift_i must be a numeric vector of length 365.")
   }
@@ -243,62 +189,52 @@ v_i <- function(lambda_shift_i, phi) {
   }
   J <- nrow(phi)
   
-  # --- Column scaling: A_i(:, m) = lambda_shift_i[m] * phi(:, m) ---
-  A <- sweep(phi, 2L, lambda_shift_i, "*")  # J x 365
+  # Scale each integrated basis column by the subject-specific circulation.
+  A <- sweep(phi, 2L, lambda_shift_i, "*")
   
-  # --- Cumulative columns: V[, 0] = 0, V[, d] = V[, d-1] + A[, d] ---
+  # Accumulate v_i(d), with column 1 reserved for v_i(0) = 0.
   V <- matrix(0.0, nrow = J, ncol = 366L)
   for (m in 1:365) {
     V[, m + 1L] <- V[, m] + A[, m]
   }
   
-  # Optional: dimnames for clarity
   rownames(V) <- rownames(phi)
   colnames(V) <- c("d000", sprintf("d%03d", 1:365))
   V
 }
 
 
-#' Global RSV precomputations for a given (beta, eta)
+#' Compute global RSV precomputations
 #'
-#' Computes quantities that depend on the parameter vectors (beta, eta)
-#' and the global model, but do NOT depend on individual subjects.
-#' These can be reused across all subjects in the likelihood.
+#' Computes the daily infection-age and healthcare-visit curves for the current
+#' spline coefficients. These parameter-dependent quantities are reused across
+#' subjects during likelihood and estimation calculations.
 #'
-#' Specifically, this function computes the daily weights
-#'   w(m; beta) = beta^T b(m)
-#'   c(m; eta)  = eta^T s(m)
-#' for m = 1, ..., 365, where the basis matrices B_day and S_day are
-#' provided in the rsv_model object. The resulting vectors are then
-#' enforced to be nonnegative via the internal helper .enforce_nonneg(),
-#' and stabilized for use inside log-likelihood terms via
-#' .stabilize_for_log(), which applies a positive floor eps_log from
-#' the control object.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients.
+#' @param model An `rsv_model` object containing the daily spline bases
+#'   `B_day` and `S_day`.
+#' @param control An `rsv_control` object controlling nonnegativity checks and
+#'   numerical stabilization.
 #'
-#' @param beta Numeric vector of length J (infection-age coefficients).
-#'             Must satisfy length(beta) == nrow(model$B_day).
-#' @param eta  Numeric vector of length K (detection coefficients).
-#'             Must satisfy length(eta) == nrow(model$S_day).
-#' @param model An "rsv_model" object created by make_rsv_model(), which
-#'   must contain numeric components B_day (J x 365) and S_day (K x 365).
-#' @param control An "rsv_control" object created by make_rsv_control().
-#'   Its fields tol_clip, check_bounds, warn_on_clip, and eps_log govern how
-#'   nonnegativity and log-safety are enforced on w_vec and c_vec.
+#' @return A named list of global precomputations containing:
+#' \describe{
+#'   \item{\code{w_vec}}{Numeric vector of length 365 containing the
+#'     infection-age curve \eqn{w(a)} over ages 1 through 365 days.}
+#'   \item{\code{c_vec}}{Numeric vector of length 365 containing the
+#'     healthcare-visit curve \eqn{c(a)} over ages 1 through 365 days.}
+#' }
 #'
-#' @return A list with components:
-#'   \itemize{
-#'     \item \code{w_vec} – numeric length-365 vector w(m; beta), m=1..365,
-#'           enforced to be nonnegative and bounded below by eps_log.
-#'     \item \code{c_vec} – numeric length-365 vector c(m; eta), m=1..365,
-#'           enforced to be nonnegative and bounded below by eps_log.
-#'   }
-#'
-#' @export
+#' @details
+#' The curves are obtained by projecting \eqn{\beta} and \eqn{\eta} onto their
+#' corresponding daily spline bases. Numerical safeguards are applied through
+#' `control` before the curves are returned.
 rsv_precompute_global <- function(beta,
                                   eta,
                                   model,
                                   control = make_rsv_control()) {
-  # ---- Basic checks on model and control ----
   if (!inherits(model, "rsv_model")) {
     stop("`model` must be an object of class 'rsv_model' (from make_rsv_model()).")
   }
@@ -315,16 +251,12 @@ rsv_precompute_global <- function(beta,
   if (!is.numeric(S_day) || !(is.matrix(S_day) || is.array(S_day))) {
     stop("model$S_day must be a numeric matrix or array.")
   }
-  
-  # Optional: enforce 365-day grid consistency
   if (ncol(B_day) != 365L) {
     stop(sprintf("model$B_day must have 365 columns (found %d).", ncol(B_day)))
   }
   if (ncol(S_day) != 365L) {
     stop(sprintf("model$S_day must have 365 columns (found %d).", ncol(S_day)))
   }
-  
-  # ---- Dimension consistency with parameters ----
   if (length(beta) != nrow(B_day)) {
     stop(sprintf(
       "Length of beta (%d) must match nrow(model$B_day) (%d).",
@@ -338,11 +270,11 @@ rsv_precompute_global <- function(beta,
     ))
   }
   
-  # ---- Global per-parameter quantities ----
-  w_vec_raw <- w_day(beta, B_day)  # length 365
-  c_vec_raw <- c_day(eta,  S_day)  # length 365
+  # Evaluate the daily infection-age and healthcare-visit curves.
+  w_vec_raw <- w_day(beta, B_day)
+  c_vec_raw <- c_day(eta,  S_day)
   
-  # ---- Enforce nonnegativity using unified helper ----
+  # Enforce the model's nonnegativity constraints.
   w_vec <- .enforce_nonneg(
     x       = w_vec_raw,
     name    = "w_vec",
@@ -355,7 +287,7 @@ rsv_precompute_global <- function(beta,
     control = control
   )
   
-  # ---- Stabilize for log-safety (apply positive floor eps_log) ----
+  # Apply a positive floor before downstream logarithms.
   w_vec <- .stabilize_for_log(
     x            = w_vec,
     name         = "w_vec",
@@ -372,7 +304,6 @@ rsv_precompute_global <- function(beta,
     warn_on_clip = control$warn_on_clip
   )
   
-  # ---- Return precomputed global terms ----
   list(
     w_vec = w_vec,
     c_vec = c_vec
@@ -380,25 +311,24 @@ rsv_precompute_global <- function(beta,
 }
 
 
-#' Daily hazard weight w(m; beta)
+#' Evaluate the infection-age curve
 #'
-#' Computes the daily hazard weights \eqn{w(m; \beta) = \beta^\top b(m)} 
-#' for m = 1, ..., 365. This is the first beta–basis mixer in the RSV model.
+#' Evaluates the infection-age curve \eqn{w(a)} on the daily age grid from the
+#' infection-age spline coefficients and basis matrix.
 #'
-#' @param beta Numeric vector of length J. Coefficients for the day basis.
-#' @param B_day Numeric matrix of dimension J x 365, whose columns are the
-#'   day-basis vectors \eqn{b(m)}. Must match the length of `beta`.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param B_day Numeric `J x 365` matrix containing the daily infection-age
+#'   spline basis, where column \eqn{a} is the basis vector \eqn{b(a)}.
 #'
-#' @return Numeric vector of length 365 with elements \eqn{w[m] = \beta^\top b(m)}.
-#' @examples
-#' J <- 4
-#' B_day <- matrix(runif(J * 365), nrow = J)
-#' beta  <- runif(J)
-#' w <- w_day(beta, B_day)
-#' stopifnot(length(w) == 365)
-#' # Sanity check: manual column sums
-#' stopifnot(all.equal(w, colSums(B_day * beta)))
-#' @export
+#' @return Numeric vector of length 365 containing the infection-age curve
+#'   evaluated over ages 1 through 365 days.
+#'
+#' @details
+#' For age day \eqn{a},
+#' \deqn{
+#'   w(a) = \beta^\top b(a).
+#' }
 w_day <- function(beta, B_day) {
   if (!is.numeric(beta) || !is.numeric(B_day)) {
     stop("beta and B_day must be numeric.")
@@ -406,30 +336,29 @@ w_day <- function(beta, B_day) {
   if (length(beta) != nrow(B_day)) {
     stop("Length of beta must match number of rows in B_day.")
   }
-  # Compute w = B_day^T * beta efficiently (BLAS)
+  # Evaluate beta^T b(a) for each age day.
   as.numeric(crossprod(B_day, beta))
 }
 
 
-#' Daily correction weight c(m; eta)
+#' Evaluate the healthcare-visit curve
 #'
-#' Computes the daily weights \eqn{c(m; \eta) = \eta^\top s(m)}
-#' for m = 1, ..., 365. This is the second eta–basis mixer in the RSV model.
+#' Evaluates the healthcare-visit curve \eqn{c(a)} on the daily age grid from
+#' the healthcare-visit spline coefficients and basis matrix.
 #'
-#' @param eta Numeric vector of length K. Coefficients for the day basis s(m).
-#' @param S_day Numeric matrix of dimension K x 365, whose columns are the
-#'   day-basis vectors \eqn{s(m)}. Must match the length of `eta`.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients.
+#' @param S_day Numeric `K x 365` matrix containing the daily healthcare-visit
+#'   spline basis, where column \eqn{a} is the basis vector \eqn{s(a)}.
 #'
-#' @return Numeric vector of length 365 with elements \eqn{c[m] = \eta^\top s(m)}.
-#' @examples
-#' K <- 4
-#' S_day <- matrix(runif(K * 365), nrow = K)
-#' eta   <- runif(K)
-#' c_vec <- c_day(eta, S_day)
-#' stopifnot(length(c_vec) == 365)
-#' # Sanity check: manual column sums
-#' stopifnot(all.equal(c_vec, colSums(S_day * eta)))
-#' @export
+#' @return Numeric vector of length 365 containing the healthcare-visit curve
+#'   evaluated over ages 1 through 365 days.
+#'
+#' @details
+#' For age day \eqn{a},
+#' \deqn{
+#'   c(a) = \eta^\top s(a).
+#' }
 c_day <- function(eta, S_day) {
   if (!is.numeric(eta) || !is.numeric(S_day)) {
     stop("eta and S_day must be numeric.")
@@ -437,37 +366,32 @@ c_day <- function(eta, S_day) {
   if (length(eta) != nrow(S_day)) {
     stop("Length of eta must match number of rows in S_day.")
   }
-  # Compute c = S_day^T * eta efficiently (BLAS)
+  # Evaluate eta^T s(a) for each age day.
   as.numeric(crossprod(S_day, eta))
 }
 
 
-#' Internal helper: enforce nonnegativity on weight-like vectors
+#' Enforce nonnegativity for numeric values
 #'
-#' Ensures that a numeric vector \code{x} satisfies x >= 0 up to a tolerance.
-#' Values in [-tol_clip, 0) are treated as numerical noise and clipped to 0.
-#' Values < -tol_clip are treated as serious violations:
-#'   * if check_bounds = TRUE: an error is thrown;
-#'   * if check_bounds = FALSE: they are clipped to 0 with a warning.
+#' Replaces negative entries with zero while optionally distinguishing small
+#' numerical deviations from larger violations using `control$tol_clip`.
 #'
-#' This is intended for weight-like quantities such as w_vec and c_vec that
-#' are constrained by the model to be nonnegative, but are not probabilities
-#' (so we do not impose an upper bound here).
+#' @param x Numeric vector expected to be nonnegative.
+#' @param name Character scalar used in warning and error messages.
+#' @param control An `rsv_control` object controlling the clipping tolerance,
+#'   strict bound checks, and warning behavior.
 #'
-#' @param x Numeric vector to be checked and corrected.
-#' @param name Character string used in warnings/errors (e.g. "w_vec", "c_vec").
-#' @param control An rsv_control object from make_rsv_control(), providing
-#'   tol_clip, check_bounds, and warn_on_clip.
+#' @return Numeric vector of the same length as `x`, with negative entries
+#'   replaced by zero.
 #'
-#' @return A numeric vector with the same length as x, with all negative
-#'   entries replaced by 0 (subject to error behavior when check_bounds = TRUE
-#'   and serious violations are present).
-#'
-#' @keywords internal
+#' @details
+#' Values below `-control$tol_clip` produce an error when strict bound checking
+#' is enabled. Otherwise, all negative values are clipped to zero; larger
+#' violations always produce a warning, while small numerical deviations warn
+#' only when `control$warn_on_clip` is enabled.
 .enforce_nonneg <- function(x,
                             name    = "value",
                             control = make_rsv_control()) {
-  # ---- Basic checks ----
   if (!is.numeric(x)) {
     stop(sprintf("`%s` must be numeric in .enforce_nonneg().", name))
   }
@@ -475,7 +399,7 @@ c_day <- function(eta, S_day) {
     stop(sprintf("`%s` contains non-finite values (NA, NaN, or Inf).", name))
   }
   
-  # Extract control fields with simple fallbacks
+  # Use defaults when individual control fields are unavailable.
   tol_clip     <- if (!is.null(control$tol_clip))     control$tol_clip     else 1e-12
   check_bounds <- if (!is.null(control$check_bounds)) control$check_bounds else FALSE
   warn_on_clip <- if (!is.null(control$warn_on_clip)) control$warn_on_clip else TRUE
@@ -484,21 +408,18 @@ c_day <- function(eta, S_day) {
     stop("control$tol_clip must be a single nonnegative finite numeric value.")
   }
   
-  # ---- Identify negatives ----
   neg_idx <- which(x < 0)
   if (length(neg_idx) == 0L) {
-    # Fast path: nothing to do
     return(x)
   }
   
   x_neg <- x[neg_idx]
   
-  # Tiny negatives: within [-tol_clip, 0)
+  # Separate numerical drift from larger nonnegativity violations.
   tiny_idx    <- neg_idx[x_neg >= -tol_clip]
-  # Serious negatives: < -tol_clip
   serious_idx <- neg_idx[x_neg < -tol_clip]
   
-  # ---- Serious violations: possibly error ----
+  # In strict mode, larger violations are treated as errors.
   if (length(serious_idx) > 0L && isTRUE(check_bounds)) {
     min_val <- min(x[serious_idx])
     stop(sprintf(
@@ -507,7 +428,6 @@ c_day <- function(eta, S_day) {
     ))
   }
   
-  # ---- Perform clipping ----
   if (length(tiny_idx) > 0L) {
     x[tiny_idx] <- 0
     if (isTRUE(warn_on_clip)) {
@@ -520,7 +440,7 @@ c_day <- function(eta, S_day) {
   
   if (length(serious_idx) > 0L) {
     x[serious_idx] <- 0
-    # For serious violations, always warn in lenient mode
+    # Larger violations always warn when strict checking is disabled.
     min_val <- min(x_neg[x_neg < -tol_clip])
     warning(sprintf(
       "%s had %d values < -tol_clip (min = %g); clipped to 0. This may indicate an issue with the model or parameters.",
@@ -532,41 +452,33 @@ c_day <- function(eta, S_day) {
 }
 
 
-#' Internal helper: stabilize nonnegative values for use inside log()
+#' Stabilize nonnegative values for logarithms
 #'
-#' Given a numeric vector \code{x} that is expected to be nonnegative, this
-#' helper enforces a strictly positive lower bound \code{eps_log} so that
-#' \code{log(x)} is numerically well-defined and finite. Values in
-#' \code{[0, eps_log)} are "floored" to \code{eps_log}. Negative values are
-#' treated as violations when \code{check_bounds = TRUE}.
+#' Applies a strictly positive lower bound to numeric values before they are
+#' used inside logarithms.
 #'
-#' This helper is intended for quantities like the day-wise weights
-#' \code{w(m; beta)} or \code{c(m; eta)} that are nonnegative by construction
-#' but may become very small or slightly negative due to numerical error.
+#' @param x Numeric vector expected to be nonnegative.
+#' @param name Character scalar used in warning and error messages.
+#' @param eps_log Positive numeric scalar giving the lower bound applied to
+#'   values below `eps_log`.
+#' @param check_bounds Logical scalar controlling whether negative values
+#'   produce an error.
+#' @param warn_on_clip Logical scalar controlling warnings when values are
+#'   raised to `eps_log`.
 #'
-#' @param x Numeric vector, expected to be nonnegative.
-#' @param name Character string used in warning/error messages (e.g.,
-#'   \code{"w_vec"}, \code{"c_vec"}).
-#' @param eps_log Positive numeric scalar. Strictly positive floor used to
-#'   stabilize \code{x} for use inside \code{log()}. Typically taken from
-#'   \code{control$eps_log}.
-#' @param check_bounds Logical; if \code{TRUE}, any negative values in \code{x}
-#'   are treated as errors. If \code{FALSE}, negative values are still
-#'   stabilized but no error is thrown.
-#' @param warn_on_clip Logical; if \code{TRUE}, emit a warning whenever one or
-#'   more entries of \code{x} are raised to \code{eps_log}.
+#' @return Numeric vector of the same length as `x`, with all entries at least
+#'   `eps_log`.
 #'
-#' @return A numeric vector of the same length as \code{x}, with all entries
-#'   satisfying \code{x >= eps_log}.
-#'
-#' @keywords internal
+#' @details
+#' Negative values produce an error when `check_bounds = TRUE`; otherwise they
+#' are raised to `eps_log`. Nonnegative values below `eps_log` are also raised
+#' to the lower bound.
 .stabilize_for_log <- function(x,
                                name,
                                eps_log,
                                check_bounds = FALSE,
                                warn_on_clip = TRUE) {
   
-  # Basic checks
   if (!is.numeric(x)) {
     stop(sprintf("`%s` must be numeric in .stabilize_for_log().", name))
   }
@@ -575,7 +487,6 @@ c_day <- function(eta, S_day) {
     stop("`eps_log` must be a single positive finite numeric value in .stabilize_for_log().")
   }
   
-  # Detect negative values
   neg_idx <- which(x < 0)
   if (length(neg_idx) > 0L) {
     if (check_bounds) {
@@ -584,7 +495,7 @@ c_day <- function(eta, S_day) {
         name, length(neg_idx)
       ))
     } else {
-      # Lenient mode: raise negatives to eps_log
+      # In lenient mode, repair negative values at the logarithmic floor.
       if (warn_on_clip) {
         warning(sprintf(
           "%s has %d negative values; stabilizing them to eps_log = %g in .stabilize_for_log().",
@@ -595,7 +506,7 @@ c_day <- function(eta, S_day) {
     }
   }
   
-  # Floor small nonnegative values to eps_log
+  # Raise small nonnegative values to the strictly positive logarithmic floor.
   small_idx <- which(x >= 0 & x < eps_log)
   if (length(small_idx) > 0L) {
     if (warn_on_clip) {
@@ -611,34 +522,28 @@ c_day <- function(eta, S_day) {
 }
 
 
-#' Subject cumulative hazard H_i(m; beta)
+#' Compute the subject-specific cumulative hazard
 #'
-#' Computes the subject- and day-specific cumulative hazard
-#' \deqn{H_i(m; \beta) = \beta^\top v_i(m)} for m = 1, ..., 365,
-#' where columns of V_i are the cumulative kernels v_i(m) (Card #2).
+#' Computes the cumulative hazard \eqn{H_i(d)} from the infection-age spline
+#' coefficients and the subject-specific cumulative kernel.
 #'
-#' @param beta Numeric vector of length J. Coefficients for the day basis.
-#' @param V_i Numeric matrix J x 366. Column d is v_i(d), with column 1
-#'   representing v_i(0) = 0 (by convention). If your V_i has 366 columns,
-#'   this function uses columns 2:366 to return H_i(1:365).
-#' @param include_day0 Logical, default FALSE. If TRUE, prepend H_i(0)=0.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param V_i Numeric `J x 366` matrix containing the cumulative subject-level
+#'   kernels. Column 1 represents \eqn{v_i(0) = 0}, and column `d + 1`
+#'   represents \eqn{v_i(d)} for days 1 through 365.
+#' @param include_day0 Logical scalar controlling whether the returned vector
+#'   includes \eqn{H_i(0) = 0}.
 #'
-#' @return Numeric vector of length 365 (or 366 if include_day0=TRUE).
-#' @examples
-#' J <- 4
-#' # Build a fake cumulative V_i: v_i(0)=0, then cumulative sums of random Jx365
-#' A  <- matrix(rexp(J * 365, rate = 1), nrow = J)
-#' V  <- cbind(0, t(apply(A, 1, cumsum)))  # WRONG shape; fix to J x 366
-#' V_i <- matrix(0, nrow = J, ncol = 366)
-#' V_i[, 1] <- 0
-#' V_i[, 2:366] <- apply(A, 1, cumsum)
-#' beta <- runif(J)
-#' H <- H_i(beta, V_i)
-#' stopifnot(length(H) == 365)
-#' # Manual check for a single day m:
-#' m <- 123
-#' stopifnot(all.equal(H[m], sum(beta * V_i[, m + 1])))
-#' @export
+#' @return Numeric vector of length 365 containing \eqn{H_i(d)} for days
+#'   1 through 365, or length 366 with day zero prepended when
+#'   `include_day0 = TRUE`.
+#'
+#' @details
+#' For age day \eqn{d},
+#' \deqn{
+#'   H_i(d) = \beta^\top v_i(d).
+#' }
 H_i <- function(beta, V_i, include_day0 = FALSE) {
   if (!is.numeric(beta) || !is.numeric(V_i)) {
     stop("beta and V_i must be numeric.")
@@ -649,7 +554,7 @@ H_i <- function(beta, V_i, include_day0 = FALSE) {
   if (ncol(V_i) != 366) {
     stop("V_i must have 366 columns: v_i(0), v_i(1), ..., v_i(365).")
   }
-  # Use columns 2:366 → v_i(1:365)
+  # Skip the day-zero column and evaluate beta^T v_i(d) for days 1:365.
   H <- as.numeric(crossprod(V_i[, 2:366, drop = FALSE], beta))
   if (isTRUE(include_day0)) {
     H <- c(0, H)
@@ -658,30 +563,29 @@ H_i <- function(beta, V_i, include_day0 = FALSE) {
 }
 
 
-#' Subject survival curve \bar F_i(m; beta)
+#' Convert cumulative hazards to survival values
 #'
-#' Computes the subject-specific survival values:
-#'   Fbar_i(m) = exp( - H_i(m) )
-#' for m = 1,...,365 (or including m = 0 if include_day0 = TRUE).
+#' Computes subject-specific survival values from cumulative hazards and
+#' applies numerical clipping to preserve valid survival bounds.
 #'
-#' Numerical clipping is applied to ensure that survival values remain within
-#' (0, 1] up to floating-point tolerance. This protects against underflow
-#' (exp(-H) = 0) and slight numerical drift above 1.
+#' @param H Numeric vector of length 365 containing \eqn{H_i(d)} for days
+#'   1 through 365, or length 366 including \eqn{H_i(0) = 0} when
+#'   `include_day0 = TRUE`.
+#' @param include_day0 Logical scalar indicating whether `H` includes day zero.
+#' @param check_bounds Logical scalar controlling strict bound checks during
+#'   numerical clipping.
+#' @param warn_on_clip Logical scalar controlling warnings when clipping occurs.
 #'
-#' @param H Numeric vector of length 365 (if include_day0 = FALSE)
-#'   or length 366 (if include_day0 = TRUE). Must contain the cumulative
-#'   hazard values H_i(m).
-#' @param include_day0 Logical, default FALSE. If TRUE, expects H[1] = H_i(0)=0
-#'   and returns the corresponding survival value Fbar_i(0)=1.
-#' @param check_bounds Logical; if TRUE, treat severe violations of the
-#'   theoretical bounds (values far outside (0,1]) as errors. Intended for
-#'   debugging and model validation.
-#' @param warn_on_clip Logical; if TRUE, emit a warning whenever clipping is
-#'   applied (useful for diagnosing small numerical drift).
+#' @return Numeric vector of the same length as `H` containing the
+#'   subject-specific survival values.
 #'
-#' @return Numeric vector of survival values with same length as H.
-#'
-#' @export
+#' @details
+#' Survival is computed as
+#' \deqn{
+#'   \bar F_i(d) = \exp\{-H_i(d)\}.
+#' }
+#' Values are clipped to \eqn{(0, 1]} using machine precision as the positive
+#' lower bound.
 Fbar_from_H <- function(H,
                         include_day0 = FALSE,
                         check_bounds = FALSE,
@@ -693,23 +597,20 @@ Fbar_from_H <- function(H,
   len_H <- length(H)
   
   if (include_day0) {
-    # Expect H[1] = H_i(0)
+    # Day-zero input must begin with H_i(0) = 0.
     if (len_H != 366)
       stop("If include_day0=TRUE, H must have length 366 (H_i(0)...H_i(365)).")
     
     Fbar <- exp(-H)
     
   } else {
-    # Expect length 365
     if (len_H != 365)
       stop("If include_day0=FALSE, H must have length 365 (H_i(1)...H_i(365)).")
     
     Fbar <- exp(-H)
   }
   
-  # --- Numerical clipping for stability ---
-  # Survival values must lie in (0,1].
-  # Use a small positive lower bound to avoid underflow to 0.
+  # Keep survival values in (0, 1] and avoid numerical underflow to zero.
   eps <- .Machine$double.eps
   
   Fbar <- .clip_to_range(
@@ -725,31 +626,39 @@ Fbar_from_H <- function(H,
 }
 
 
-#' Convenience wrapper for \bar F_i(m; beta)
+#' Compute the subject-specific survival curve
 #'
-#' Computes \eqn{\bar F_i(m; \beta)} by first computing H_i(m; beta) from
-#' `beta` and `V_i`, then applying exp(-H).
+#' Computes the probability that a subject remains uninfected through each age
+#' day from the infection-age spline coefficients and subject-specific
+#' cumulative kernel.
 #'
-#' @param beta Numeric vector length J.
-#' @param V_i  Numeric matrix J x 366, with column 1 being v_i(0)=0.
-#' @param include_day0 Logical, default FALSE. If TRUE, prepend day 0.
-#' @param check_bounds Logical; if TRUE, propagate strict bound checking to
-#'   the internal survival computation.
-#' @param warn_on_clip Logical; if TRUE, propagate clipping warnings from the
-#'   internal survival computation.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param V_i Numeric `J x 366` matrix containing the cumulative subject-level
+#'   kernels. Column 1 represents \eqn{v_i(0) = 0}, and column `d + 1`
+#'   represents \eqn{v_i(d)} for days 1 through 365.
+#' @param include_day0 Logical scalar controlling whether the returned vector
+#'   includes \eqn{\bar F_i(0) = 1}.
+#' @param check_bounds Logical scalar controlling strict bound checks during
+#'   survival-value clipping.
+#' @param warn_on_clip Logical scalar controlling warnings when clipping is
+#'   applied.
 #'
-#' @return Numeric vector of length 365 (or 366 if include_day0=TRUE).
-#' @examples
-#' # Build a small synthetic example
-#' set.seed(1)
-#' J <- 3
-#' A  <- matrix(abs(rnorm(J * 365)), nrow = J)
-#' V_i <- matrix(0, nrow = J, ncol = 366)
-#' V_i[, 2:366] <- apply(A, 1, cumsum)
-#' beta <- runif(J)
-#' Fbar <- Fbar_i(beta, V_i)
-#' stopifnot(length(Fbar) == 365, all(Fbar >= 0), all(Fbar <= 1))
-#' @export
+#' @return Numeric vector of length 365 containing \eqn{\bar F_i(d)} for days
+#'   1 through 365, or length 366 with day zero prepended when
+#'   `include_day0 = TRUE`.
+#'
+#' @details
+#' The survival curve is
+#' \deqn{
+#'   \bar F_i(d)
+#'   =
+#'   \exp\{-H_i(d)\}
+#'   =
+#'   \exp\{-\beta^\top v_i(d)\}.
+#' }
+#' The cumulative hazards are computed by `H_i()`, and numerical clipping is
+#' applied by `Fbar_from_H()`.
 Fbar_i <- function(beta,
                    V_i,
                    include_day0 = FALSE,
@@ -773,38 +682,32 @@ Fbar_i <- function(beta,
 }
 
 
-#' Event probability per day: pi_i(m; beta)
+#' Compute daily first-infection probabilities
 #'
-#' Computes the subject- and day-specific event probability
-#' \deqn{\pi_i(m; \beta) = 1 - \exp\{-\lambda_i[m] \cdot w[m]\}, \quad m=1,\dots,365,}
-#' where \eqn{w[m] = \beta^\top b(m)} and \eqn{\lambda_i[m] = \lambda(m+B_i)}.
+#' Computes the subject-specific probability of first infection on each age day,
+#' conditional on remaining uninfected through the previous day.
 #'
-#' Prefer calling `pi_from_w(lambda_shift_i, w)` if `w` is already computed
-#' (e.g., once per beta using `w_day(beta, B_day)`). The wrapper `pi_i()`
-#' will compute `w` internally from `beta` and `B_day` for convenience.
+#' @param lambda_shift_i Numeric vector of length 365 containing the
+#'   subject-specific RSV circulation values over ages 1 through 365 days.
+#' @param w Numeric vector of length 365 containing the infection-age curve
+#'   \eqn{w(a)} over ages 1 through 365 days.
+#' @param check_bounds Logical scalar controlling strict probability-bound
+#'   checks during numerical clipping.
+#' @param warn_on_clip Logical scalar controlling warnings when clipping is
+#'   applied.
 #'
-#' Numerical clipping is applied to ensure that the resulting probabilities
-#' lie in [0, 1] up to floating-point tolerance. This protects against small
-#' numerical drift outside [0, 1].
+#' @return Numeric vector of length 365 containing the conditional
+#'   first-infection probabilities \eqn{\pi_i(a)}.
 #'
-#' @param lambda_shift_i Numeric vector length 365 with \eqn{\lambda(m+B_i)} for subject i.
-#' @param w Numeric vector length 365 with \eqn{w[m] = \beta^\top b(m)}.
-#' @param check_bounds Logical; if TRUE, severe violations of the [0,1] bounds
-#'   (values far outside [0,1] beyond a tolerance) trigger an error. Intended
-#'   for debugging and model validation.
-#' @param warn_on_clip Logical; if TRUE, emit a warning whenever clipping is
-#'   applied to the probabilities.
-#'
-#' @return Numeric vector length 365 with \eqn{\pi_i[m]} in [0,1] up to numerical
-#'   tolerance.
-#' @examples
-#' # Core usage with precomputed w:
-#' set.seed(1)
-#' lambda_i <- rexp(365, 0.2)   # shifted lambda for subject i
-#' w <- runif(365)              # w(m; beta)
-#' pi <- pi_from_w(lambda_i, w)
-#' stopifnot(length(pi) == 365, all(pi >= 0), all(pi <= 1))
-#' @export
+#' @details
+#' For age day \eqn{a},
+#' \deqn{
+#'   \pi_i(a)
+#'   =
+#'   1 - \exp\{-\lambda_i(a)w(a)\}.
+#' }
+#' The probabilities are clipped to \eqn{[0, 1]} to guard against numerical
+#' drift outside the valid probability range.
 pi_from_w <- function(lambda_shift_i,
                       w,
                       check_bounds = FALSE,
@@ -814,11 +717,11 @@ pi_from_w <- function(lambda_shift_i,
   if (!is.numeric(w) || length(w) != 365L)
     stop("w must be numeric length 365.")
   
-  # Stable form: 1 - exp(-x) == -expm1(-x)
+  # Use expm1() for stable evaluation of 1 - exp(-x).
   x  <- lambda_shift_i * w
   pi <- -expm1(-x)
   
-  # Numerical guard to keep probabilities within [0,1] up to tolerance
+  # Guard against numerical drift outside the probability range.
   pi <- .clip_to_range(
     pi,
     lower        = 0.0,
@@ -832,28 +735,38 @@ pi_from_w <- function(lambda_shift_i,
 }
 
 
-#' Q_i(m; beta) = \bar F_i(m-1) * pi_i(m)
+#' Compute the subject-specific first-infection mass
 #'
-#' Vectorized computation of the visit-day kernel Q_i over m = 1..365, given
-#' survival tail \bar F_i(d; beta) for d = 0..365 and per-day visit prob
-#' pi_i(m; beta) for m = 1..365.
+#' Computes the unconditional probability mass of first infection on each age
+#' day from the subject-specific survival curve and conditional first-infection
+#' probabilities.
 #'
-#' @param Fbar_i Numeric length-366 vector: \bar F_i(d; beta) for d = 0..365.
-#'               The first entry corresponds to d = 0.
-#' @param pi_i   Numeric length-365 vector: pi_i(m; beta) for m = 1..365.
-#' @param check_bounds Logical; if TRUE, propagate strict bound checking to
-#'   the internal probability computations.
-#' @param warn_on_clip Logical; if TRUE, emit warnings whenever clipping is
-#'   applied to Fbar_i or pi_i.
+#' @param Fbar_i Numeric vector of length 366 containing the subject-specific
+#'   survival curve from day zero through day 365, where element `d + 1`
+#'   represents \eqn{\bar F_i(d)}.
+#' @param pi_i Numeric vector of length 365 containing the conditional
+#'   first-infection probabilities \eqn{\pi_i(a)} for ages 1 through 365 days.
+#' @param check_bounds Logical scalar controlling strict probability-bound
+#'   checks during numerical clipping.
+#' @param warn_on_clip Logical scalar controlling warnings when clipping is
+#'   applied.
 #'
-#' @return Numeric length-365 vector Q_i with Q_i[m] = Fbar_i[m] * pi_i[m],
-#'         i.e., \bar F_i(m-1) * pi_i(m).
-#' @export
+#' @return Numeric vector of length 365 containing the first-infection
+#'   probability masses \eqn{Q_i(a)}.
+#'
+#' @details
+#' For age day \eqn{a},
+#' \deqn{
+#'   Q_i(a)
+#'   =
+#'   \bar F_i(a - 1)\pi_i(a).
+#' }
+#' The resulting values are clipped to \eqn{[0, 1]} to guard against numerical
+#' drift outside the valid probability range.
 Q_i <- function(Fbar_i,
                 pi_i,
                 check_bounds = FALSE,
                 warn_on_clip = TRUE) {
-  # --- shape checks ---
   if (!is.numeric(Fbar_i) || length(Fbar_i) != 366L) {
     stop("Fbar_i must be a numeric vector of length 366 (d = 0..365).")
   }
@@ -861,8 +774,7 @@ Q_i <- function(Fbar_i,
     stop("pi_i must be a numeric vector of length 365 (m = 1..365).")
   }
   
-  # --- stability guards using unified clipping ---
-  # Fbar must lie in (0, 1], pi must lie in [0, 1].
+  # Enforce the theoretical bounds for survival and conditional probabilities.
   eps <- .Machine$double.eps
   
   Fbar_i <- .clip_to_range(
@@ -883,12 +795,10 @@ Q_i <- function(Fbar_i,
     warn_on_clip = warn_on_clip
   )
   
-  # --- vectorized product with the (m-1) shift for Fbar ---
-  # For m=1..365, use Fbar_i[m] (which is \bar F at d=m-1)
-  # i.e., Fbar_i[m] corresponds to \bar F_i(m-1).
+  # Element m of Fbar_i represents survival through day m - 1.
   Q <- Fbar_i[1:365] * pi_i
   
-  # Final clipping to [0,1] to counter tiny numerical drift
+  # Guard against numerical drift outside the probability range.
   Q <- .clip_to_range(
     Q,
     lower        = 0.0,
@@ -902,30 +812,41 @@ Q_i <- function(Fbar_i,
 }
 
 
-#' U_i(beta) = sum_m s(m) * Q_i(m; beta)
+#' Compute the subject-specific healthcare-visit kernel
 #'
-#' Computes the K-vector U_i by multiplying the precomputed day-basis S_day
-#' (K x 365; columns are s(m)) by the Q_i vector (length 365).
+#' Projects the subject-specific first-infection probability mass onto the
+#' healthcare-visit spline basis.
 #'
-#' @param Q_i   Numeric length-365 vector: Q_i(m; beta) for m = 1..365.
-#' @param S_day Numeric K x 365 matrix: columns are s(m).
-#' @param check_bounds Logical; if TRUE, apply strict bound checking to Q_i
-#'   via the internal clipping helper.
-#' @param warn_on_clip Logical; if TRUE, emit a warning whenever clipping is
-#'   applied to Q_i.
+#' @param Q_i Numeric vector of length 365 containing the first-infection
+#'   probability masses \eqn{Q_i(a)} over ages 1 through 365 days.
+#' @param S_day Numeric `K x 365` matrix containing the daily healthcare-visit
+#'   spline basis, where column \eqn{a} is the basis vector \eqn{s(a)}.
+#' @param check_bounds Logical scalar controlling strict bound checks when
+#'   validating `Q_i`.
+#' @param warn_on_clip Logical scalar controlling warnings when clipping is
+#'   applied to `Q_i`.
 #'
-#' @return Numeric length-K vector U_i = S_day %*% Q_i.
-#' @export
+#' @return Numeric vector of length `K` containing the subject-specific
+#'   healthcare-visit kernel \eqn{U_i}.
+#'
+#' @details
+#' The kernel is
+#' \deqn{
+#'   U_i
+#'   =
+#'   \sum_{a=1}^{365} s(a)Q_i(a).
+#' }
+#' Equivalently, \eqn{U_i = S Q_i}. Small negative values introduced by
+#' numerical error are set to zero.
 U_i <- function(Q_i,
                 S_day,
                 check_bounds = FALSE,
                 warn_on_clip = TRUE) {
-  ## --- shape checks ---
   if (!is.numeric(Q_i) || length(Q_i) != 365L) {
     stop("Q_i must be a numeric vector of length 365.")
   }
   
-  # Allow base matrix or Matrix package classes
+  # Accept either a base R matrix or a Matrix-class object.
   isValidMatrix <-
     (is.matrix(S_day) ||
        inherits(S_day, "Matrix")) &&
@@ -939,8 +860,7 @@ U_i <- function(Q_i,
     stop("S_day must have 365 columns (one for each s(m)).")
   }
   
-  ## --- stability guard for Q_i using unified clipping ---
-  # Q_i should be in [0, 1] since it is built from probabilities.
+  # Enforce the probability bounds for Q_i before projection.
   Q_i <- .clip_to_range(
     Q_i,
     lower        = 0.0,
@@ -950,38 +870,49 @@ U_i <- function(Q_i,
     warn_on_clip = warn_on_clip
   )
   
-  ## --- compute U_i = S_day %*% Q_i ---
   U <- as.vector(S_day %*% Q_i)
   
-  ## --- clean tiny negatives from numerical noise ---
+  # Remove tiny negative values introduced by numerical error.
   U[U < 0 & U > -1e-12] <- 0
   
   U
 }
 
 
-#' tau_i(beta, eta) = 1 - t(eta) %*% U_i(beta)
+#' Compute the subject-specific no-visit probability
 #'
-#' Computes the scalar \eqn{\tau_i(\beta, \eta) = 1 - \eta^\top U_i(\beta)}.
-#' Numerically guards against values at or below a small threshold \code{eps_tau}.
+#' Computes the probability that a subject has no healthcare visit during the
+#' first year of life from the subject-specific healthcare-visit kernel and
+#' healthcare-visit spline coefficients.
 #'
-#' @param U_i Numeric vector of length K: U_i(beta).
-#' @param eta Numeric vector of length K: visit-parameter vector \eqn{\eta}.
-#' @param eps_tau Nonnegative numeric scalar; minimum allowed value for tau.
-#'   Default \code{1e-12}. Set to \code{0} to disable clipping.
-#' @param check_bounds Logical; if TRUE, throw an error when tau violates
-#'   the admissible interval [eps_tau, 1].
-#' @param warn_on_clip Logical; if TRUE, emit a warning when tau is clipped
-#'   to the admissible interval [eps_tau, 1].
+#' @param U_i Numeric vector of length `K` containing the subject-specific
+#'   healthcare-visit kernel.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients.
+#' @param eps_tau Nonnegative numeric scalar giving the lower bound applied to
+#'   the no-visit probability. Set to zero to disable the positive floor.
+#' @param check_bounds Logical scalar controlling strict bound checks during
+#'   numerical clipping.
+#' @param warn_on_clip Logical scalar controlling warnings when clipping is
+#'   applied.
 #'
-#' @return Numeric scalar tau in \eqn{[eps_\tau, 1]}.
-#' @export
+#' @return Numeric scalar containing the no-visit probability \eqn{\tau_i},
+#'   bounded to the interval \eqn{[\mathrm{eps\_tau}, 1]}.
+#'
+#' @details
+#' The no-visit probability is
+#' \deqn{
+#'   \tau_i(\beta, \eta)
+#'   =
+#'   1 - \eta^\top U_i(\beta).
+#' }
+#' A lower bound of `eps_tau` is applied to avoid numerical instability when
+#' the probability is close to zero.
 tau_i <- function(U_i,
                   eta,
                   eps_tau = 1e-12,
                   check_bounds = FALSE,
                   warn_on_clip = TRUE) {
-  # --- shape checks ---
   if (!is.numeric(U_i) || !is.numeric(eta))
     stop("U_i and eta must be numeric.")
   if (length(U_i) != length(eta))
@@ -989,19 +920,14 @@ tau_i <- function(U_i,
   if (!is.finite(eps_tau) || eps_tau < 0)
     stop("eps_tau must be a nonnegative finite number.")
   
-  # --- core computation ---
   dot <- sum(eta * U_i)
   if (!is.finite(dot))
     stop("Non-finite dot product: check inputs.")
   
   tau <- 1 - dot
   
-  # --- clipping / diagnostics ---
-  # Valid range is [eps_tau, 1].
-  # tau_i should not use .Machine$double.eps as a lower bound,
-  # because extremely small tau leads to numerical instability in
-  # normalization and log-likelihood evaluation. A model-appropriate floor
-  # (eps_tau, default 1e-12) is used instead.
+  # Use eps_tau rather than machine epsilon to avoid unstable 
+  # near-zero no-visit probabilities.
   tau <- .clip_to_range(
     tau,
     lower        = eps_tau,
@@ -1015,50 +941,29 @@ tau_i <- function(U_i,
 }
 
 
-#' Internal helper: clip numeric values into a bounded interval
+#' Clip numeric values to a bounded interval
 #'
-#' Clips a numeric vector \code{x} into the interval \code{[lower, upper]},
-#' with optional strict boundary checking and optional warnings when clipping
-#' occurs. This utility is intended for internal use in functions that compute
-#' probabilities, survival values, or other quantities that are theoretically
-#' bounded within a known interval.
+#' Clips numeric values to a specified interval, with optional checks for
+#' violations beyond a numerical tolerance.
 #'
-#' The behavior is controlled by two arguments:
-#' \itemize{
-#'   \item \code{check_bounds}: If \code{TRUE}, values that lie \emph{far}
-#'   outside the interval \code{[lower, upper]} (beyond a tolerance \code{tol})
-#'   trigger an error. This is useful for debugging or strict validation.
+#' @param x Numeric vector containing the values to clip.
+#' @param lower,upper Numeric scalars defining the clipping interval, with
+#'   `lower <= upper`.
+#' @param name Character scalar used in warning and error messages.
+#' @param check_bounds Logical scalar controlling whether violations beyond
+#'   `tol` produce an error.
+#' @param warn_on_clip Logical scalar controlling warnings when clipping is
+#'   applied.
+#' @param tol Nonnegative numeric scalar distinguishing small numerical
+#'   deviations from larger bound violations.
 #'
-#'   \item \code{warn_on_clip}: If \code{TRUE}, a warning is emitted whenever
-#'   clipping occurs, even if values lie only slightly outside the interval
-#'   (within \code{tol}). This helps detect small numerical drift while keeping
-#'   computation stable.
-#' }
+#' @return Numeric vector of the same length as `x`, with values clipped to
+#'   the interval [`lower`, `upper`].
 #'
-#' The final output is always clipped to \code{[lower, upper]} regardless of
-#' the settings, unless \code{check_bounds = TRUE} and severe violations are
-#' detected, in which case an error is raised.
-#'
-#' @param x Numeric vector. Values to be clipped into \code{[lower, upper]}.
-#' @param lower,upper Numeric scalars defining the clipping interval. Must
-#'   satisfy \code{lower <= upper}.
-#' @param name Character string used in error and warning messages (e.g.,
-#'   \code{"pi_i"}, \code{"Q_i"}, \code{"Fbar_i"}).
-#' @param check_bounds Logical; if \code{TRUE}, severe violations (values below
-#'   \code{lower - tol} or above \code{upper + tol}) yield an error.
-#' @param warn_on_clip Logical; if \code{TRUE}, emit a warning whenever any
-#'   value is clipped.
-#' @param tol Numeric tolerance used to distinguish slight floating-point drift
-#'   from genuine violations. Must be nonnegative.
-#'
-#' @return A numeric vector of the same length as \code{x}, with all values
-#'   clipped into \code{[lower, upper]}.
-#'
-#' @keywords internal
-#' @examples
-#' x <- c(-1e-14, 0.5, 1 + 2e-14)
-#' .clip_to_range(x, 0, 1, name = "example")
-#'
+#' @details
+#' Values outside the interval by more than `tol` produce an error when
+#' `check_bounds = TRUE`. Otherwise, out-of-range values are clipped to the
+#' specified bounds.
 .clip_to_range <- function(x, lower, upper,
                            name = "value",
                            check_bounds = FALSE,
@@ -1078,17 +983,15 @@ tau_i <- function(U_i,
     stop("Argument 'tol' must be a nonnegative finite numeric scalar.")
   }
   
-  # Identify any out-of-bounds values
   below <- x < lower
   above <- x > upper
   any_oob <- any(below | above)
   
   if (!any_oob) {
-    # Fast path: no clipping needed
     return(x)
   }
   
-  # Severe violations beyond numerical tolerance
+  # Distinguish numerical drift from violations beyond tolerance.
   far_below <- x < (lower - tol)
   far_above <- x > (upper + tol)
   n_far <- sum(far_below | far_above)
@@ -1100,7 +1003,6 @@ tau_i <- function(U_i,
     ))
   }
   
-  # Warn when clipping occurs
   if (warn_on_clip) {
     n_oob <- sum(below | above)
     warning(sprintf(
@@ -1109,6 +1011,5 @@ tau_i <- function(U_i,
     ))
   }
   
-  # Clip and return
   pmin(pmax(x, lower), upper)
 }
