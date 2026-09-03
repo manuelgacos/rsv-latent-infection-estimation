@@ -160,7 +160,7 @@ When `save_plots = TRUE`, the following recovery figures are written to the `out
 │   ├── estimation.R
 │   ├── simulation.R
 │   └── diagnostics.R
-├── inputs/
+├── data/
 ├── outputs/
 └── docs/
     ├── technical_walkthrough.md
