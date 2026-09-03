@@ -1,69 +1,46 @@
-# NOTE: Make this function more lightweight in memory for large simulations
-# NOTE: Need to update the model (constant, periodic) functions to make the 
-#   model check work
-#' Generate subjects for RSV simulations (Bucket E)
+# Simulation
+#
+# Generates synthetic subjects, constructs subject-specific visit
+# distributions, and samples healthcare-visit outcomes for the RSV workflow.
+
+
+# Subject generation -------------------------------------------------------
+
+
+#' Generate subjects for RSV simulation
 #'
-#' Creates a synthetic cohort of \code{n} subjects for the RSV simulation pipeline.
-#' Each subject is assigned a calendar-time birthday index \code{birth_index} and
-#' an initial \code{visit_age = NA_integer_} (to be filled later by the visit
-#' simulation step).
+#' Constructs a synthetic cohort before healthcare visits are simulated. Each
+#' subject is assigned a birth index sampled uniformly from the permitted
+#' birth-index range and an initial missing healthcare-visit age.
 #'
-#' Birthdays are sampled uniformly on \eqn{\{1,\dots,\code{birth_max}\}}. To keep
-#' the simulation components consistent, this function enforces compatibility
-#' between \code{birth_max} and \code{model$age_len} when \code{age_len} is present
-#' in the model.
+#' @param n Positive integer scalar giving the number of subjects to generate.
+#' @param model An `rsv_model` object used to check simulation dimensions when
+#'   an `age_len` component is available.
+#' @param birth_max Positive integer scalar giving the largest birth index that
+#'   can be sampled. This argument must be supplied. If `model$age_len` exists,
+#'   `birth_max` must equal `model$age_len`.
+#' @param seed Integer scalar or `NULL`. If supplied, it is used to make birth
+#'   sampling reproducible, and the previous random-number-generator state is
+#'   restored on exit.
 #'
-#' @param n Integer \eqn{\ge 1}. Number of subjects to generate.
-#' @param model An \code{"rsv_model"} object. If \code{model$age_len} exists, it is
-#'   used only for a consistency check against \code{birth_max}.
-#' @param birth_max Integer > 0. Maximum birth day index (calendar days) used when
-#'   sampling birthdays. This argument is required unless \code{model$age_len} is
-#'   present and your implementation chooses to default \code{birth_max} from it.
-#'
-#'   \strong{Compatibility rule:}
-#'   \itemize{
-#'     \item If \code{model} does \emph{not} contain \code{age_len}, then
-#'       \code{birth_max} must be provided (non-\code{NULL}).
-#'     \item If \code{model} \emph{does} contain \code{age_len}, then
-#'       \code{birth_max} must be provided and must satisfy
-#'       \code{birth_max == model$age_len}; otherwise an error is thrown.
-#'   }
-#'
-#' @param seed Optional integer seed for reproducibility. If supplied, the RNG
-#'   state is restored on exit.
-#'
-#' @return A named list with components:
+#' @return A named list containing:
 #' \describe{
-#'   \item{\code{data}}{An \code{"rsv_data"} object created by \code{make_rsv_data()}
-#'     containing the generated subjects.}
-#'   \item{\code{subjects}}{A list of subject records (as created by \code{make_subject()}).}
-#'   \item{\code{birth_days}}{Integer vector of length \code{n} with sampled birthdays
-#'     (the \code{birth_index} values).}
+#'   \item{\code{data}}{An `rsv_data` object containing the generated subjects.}
+#'   \item{\code{subjects}}{List of `n` subject records created by
+#'     `make_subject()`.}
+#'   \item{\code{birth_days}}{Integer vector of length `n` containing the
+#'     sampled birth indices.}
+#'   \item{\code{birth_max}}{Positive integer scalar giving the largest birth
+#'     index used for sampling.}
 #' }
 #'
 #' @details
-#' The generated subject records include:
-#' \itemize{
-#'   \item \code{id = 1:n}
-#'   \item \code{birth_index} sampled uniformly from \code{1:birth_max}
-#'   \item \code{visit_age = NA_integer_} (placeholder until Bucket F)
-#' }
-#'
-#' @seealso \code{\link{make_sim_model_lambda_const}},
-#'   \code{\link{make_sim_model_lambda_periodic}},
-#'   \code{\link{simulate_visits_dataset}}
-#'
-#' @examples
-#' \dontrun{
-#' sim <- make_sim_model_lambda_const()
-#' subj <- make_sim_subjects(n = 1000, model = sim$model, birth_max = 365, seed = 1)
-#' head(subj$birth_days)
-#' }
-#'
-#' @export
+#' Birth indices are sampled independently and uniformly with replacement from
+#' `1:birth_max`. Subject identifiers are assigned sequentially from 1 through
+#' `n`, `visit_age` is initialized to `NA_integer_`, and the default likelihood
+#' weight from `make_subject()` is one.
 make_sim_subjects <- function(n, model, birth_max = NULL, seed = NULL) {
-  # Need to update the model functions to make this work
-  #stopifnot(inherits(model, "rsv_model"))
+  
   stopifnot(is.numeric(n), length(n) == 1L, n >= 1)
   
   if (!is.null(seed)) {
@@ -72,16 +49,16 @@ make_sim_subjects <- function(n, model, birth_max = NULL, seed = NULL) {
     set.seed(seed)
   }
   
-  # ---- Decide birth_max using "old vs new model" rules ----------------------
+  # Determine the permitted birth-index range.
   has_age_len <- !is.null(model$age_len)
   
   if (!has_age_len) {
-    # Old model: MUST provide birth_max
+    # Require birth_max when the model does not define age_len.
     if (is.null(birth_max)) {
       stop("make_sim_subjects: model has no 'age_len', so you must provide 'birth_max'.")
     }
   } else {
-    # New model: MUST provide birth_max and it MUST match model$age_len
+    # Require birth_max to match the model age window when age_len is defined.
     if (is.null(birth_max)) {
       stop("make_sim_subjects: model has 'age_len', so you must provide 'birth_max' and it must equal model$age_len.")
     }
@@ -96,8 +73,12 @@ make_sim_subjects <- function(n, model, birth_max = NULL, seed = NULL) {
   birth_max <- as.integer(birth_max)
   if (birth_max <= 0L) stop("make_sim_subjects: 'birth_max' must be a positive integer.")
   
-  # ---- Sample birth days (uniformly) and build subjects ---------------------------------
-  birth_days <- sample.int(birth_max, size = as.integer(n), replace = TRUE)
+  # Sample birth indices and construct subject records.
+  birth_days <- sample.int(
+    birth_max,
+    size = as.integer(n),
+    replace = TRUE
+    )
   
   subject_list <- vector("list", length = as.integer(n))
   for (i in seq_len(as.integer(n))) {
@@ -119,113 +100,78 @@ make_sim_subjects <- function(n, model, birth_max = NULL, seed = NULL) {
 }
 
 
-#' Construct a single RSV subject object
+#' Construct an RSV subject record
 #'
-#' This function creates a standardized R list representing one subject in the
-#' dataset. The resulting object contains all observable information required
-#' for computing that subject's contribution to the log-likelihood.
+#' Creates a standardized subject record containing the birth timing,
+#' healthcare-visit outcome, and likelihood weight used throughout the RSV
+#' workflow.
 #'
-#' @param id Optional subject identifier (numeric, character, etc.).
+#' @param id Optional subject identifier.
+#' @param birth_index Integer scalar giving the subject's one-based calendar
+#'   birth index. This index is used to align the seasonal RSV circulation
+#'   curve with the subject's age.
+#' @param visit_age Integer scalar in 1:365 giving the age in days of the
+#'   healthcare visit, or `NA` if no visit occurred during the first year.
+#' @param weight Numeric scalar giving the multiplicative weight applied to
+#'   the subject's likelihood contribution. The default is 1.
 #'
-#' @param birth_index Integer. The subject's birth day expressed as a calendar
-#'   index B_i. This index is used to shift the global lambda(t) curve onto the
-#'   subject-specific age scale, i.e., lambda(a + B_i).
-#'
-#' @param visit_age Integer in 1:365, or NA. The age L_i (in days) at which the
-#'   subject had their *first* bronchiolitis visit. If the subject had no visit
-#'   in the first year of life, this should be NA. This value determines whether
-#'   the subject belongs to I1 (visit before age 1) or I2 (no visit before age 1).
-#'
-#' @param weight Numeric scalar. Optional multiplicative weight for the
-#'   log-likelihood (default = 1). This can be used to incorporate sampling
-#'   weights or bootstrap weights if needed.
-#'
-#' @return A list containing:
-#'   \itemize{
-#'     \item \code{id} – subject identifier.
-#'     \item \code{birth_index} – integer birth index B_i.
-#'     \item \code{visit_age} – integer L_i in 1:365, or NA if no visit by age 1.
-#'     \item \code{weight} – weight applied to the subject’s likelihood term.
-#'   }
-#'
-#' The returned object is meant to be stored inside a larger list of subjects
-#' (via \code{make_rsv_data()}) and should be treated as read-only once created.
-#'
+#' @return A named list containing:
+#' \describe{
+#'   \item{\code{id}}{Optional subject identifier.}
+#'   \item{\code{birth_index}}{Integer scalar giving the one-based calendar
+#'     birth index.}
+#'   \item{\code{visit_age}}{Integer scalar in 1:365 giving the
+#'     healthcare-visit age, or `NA_integer_` if no visit occurred during the
+#'     first year.}
+#'   \item{\code{weight}}{Numeric scalar giving the subject's likelihood
+#'     weight.}
+#' }
 make_subject <- function(id = NULL, birth_index, visit_age, weight = 1) {
   
-  # ---- Input validation -----------------------------------------------------
-  
-  # birth_index must be a single finite number.
-  # This index aligns the global lambda(t) with the subject's age scale.
   if (length(birth_index) != 1L || !is.finite(birth_index)) {
     stop("birth_index must be a single finite number.")
   }
   
-  # visit_age must be either:
-  #   * NA   (meaning no visit in the first year), OR
-  #   * an integer in 1:365 (meaning the first visit occurred at that age).
+  # Validate the visit age only when a visit is observed.
   if (!is.na(visit_age)) {
     if (visit_age < 1 || visit_age > 365) {
       stop("visit_age must be in 1:365 or NA.")
     }
   }
   
-  # ---- Return subject structure --------------------------------------------
   
   list(
-    # Optional identifier, useful for debugging or reporting.
     id = id,
-    
-    # Birth day index B_i (stored as integer for consistency).
     birth_index = as.integer(birth_index),
-    
-    # First visit age L_i (NA_integer_ if no visit before age 1).
     visit_age = if (is.na(visit_age)) NA_integer_ else as.integer(visit_age),
-    
-    # Multiplicative weight for likelihood contribution.
     weight = weight
   )
 }
 
 
-#' Construct the RSV data object
+#' Construct an RSV data object
 #'
-#' This function validates and packages a list of per-subject objects into a
-#' standardized data container for use in the RSV likelihood. Each element of
-#' the input \code{subjects} list must have been created by \code{make_subject()}
-#' or must contain the same fields that \code{make_subject()} guarantees.
+#' Validates and packages a list of subject records into the standardized data
+#' container used throughout the RSV workflow.
 #'
-#' @param subjects A list of subject objects, each created by
-#'   \code{make_subject()}. Each subject must contain at least the fields:
-#'   \itemize{
-#'     \item \code{birth_index} – integer B_i.
-#'     \item \code{visit_age}   – age at first visit L_i (1–365) or NA.
-#'     \item \code{weight}      – likelihood weight.
-#'   }
-#'   Additional fields (e.g., \code{id}) are allowed.
+#' @param subjects List of subject records. Each element must be a list
+#'   containing at least `birth_index`, `visit_age`, and `weight`. Additional
+#'   fields, such as `id`, are allowed.
 #'
-#' @return An object of class \code{"rsv_data"}:
-#'   \itemize{
-#'     \item \code{subjects} – the validated list of subject objects.
-#'   }
-#'
-#' The resulting object is intended to be read-only in downstream computations.
-#'
+#' @return An `rsv_data` object containing:
+#' \describe{
+#'   \item{\code{subjects}}{The validated list of subject records.}
+#' }
 make_rsv_data <- function(subjects) {
   
-  # ---- Basic structure checks ------------------------------------------------
-  
-  # 1. subjects must be a list
   if (!is.list(subjects)) {
     stop("`subjects` must be a list of subject objects.")
   }
   
-  # Allow empty list (not typical, but consistent), but warn
+  # Allow an empty subject list, but warn because it is atypical.
   if (length(subjects) == 0L) {
     warning("`subjects` list is empty. Likelihood will be zero.")
   }
-  
-  # ---- Validate each subject -------------------------------------------------
   
   required_fields <- c("birth_index", "visit_age", "weight")
   
@@ -233,12 +179,10 @@ make_rsv_data <- function(subjects) {
     
     subj <- subjects[[i]]
     
-    # Each subject must itself be a list
     if (!is.list(subj)) {
       stop(sprintf("subjects[[%d]] is not a list.", i))
     }
     
-    # Check for required fields
     missing_fields <- setdiff(required_fields, names(subj))
     if (length(missing_fields) > 0L) {
       stop(sprintf(
@@ -248,8 +192,7 @@ make_rsv_data <- function(subjects) {
       ))
     }
     
-    # No need to deeply validate values here (make_subject already handles that),
-    # but we can enforce types lightly:
+    # Apply lightweight type checks to required numeric fields.
     if (!is.null(subj$birth_index) && !is.numeric(subj$birth_index)) {
       stop(sprintf("subjects[[%d]]$birth_index must be numeric/integer.", i))
     }
@@ -258,8 +201,6 @@ make_rsv_data <- function(subjects) {
     }
   }
   
-  # ---- Create the rsv_data object -------------------------------------------
-  
   out <- list(subjects = subjects)
   class(out) <- "rsv_data"
   
@@ -267,28 +208,40 @@ make_rsv_data <- function(subjects) {
 }
 
 
-#' Compute visit pmfs for all subjects (precomputed inputs)
+# Visit distribution construction -----------------------------------------
+
+
+#' Construct visit distributions for all subjects
 #'
-#' Returns a named list where each element is the full pmf
-#' (length 366 named vector) for a subject.
+#' Constructs one subject-specific distribution over healthcare-visit age and
+#' the no-visit outcome for each set of subject-level precomputations.
 #'
-#' Assumes:
-#'   - Global precompute (w_vec, c_vec) is already done
-#'   - Subject precompute (lambda_i, V_i, id) is already done
+#' @param subj_pre_list Non-empty list of subject-level precomputations. Each
+#'   element must contain `lambda_i`, a numeric vector of length 365, and
+#'   `V_i`, a numeric J x 366 matrix.
+#' @param w_vec Numeric vector of length 365 containing the infection-age
+#'   curve over the daily age grid.
+#' @param c_vec Numeric vector of length 365 containing the healthcare-visit
+#'   curve over the daily age grid.
+#' @param beta Numeric vector of length J containing the infection-age spline
+#'   coefficients.
+#' @param eta Numeric vector of length K containing the healthcare-visit
+#'   spline coefficients. This argument is passed through to `pmf_i()`.
+#' @param S_day Numeric K x 365 matrix containing the healthcare-visit spline
+#'   basis. This argument is passed through to `pmf_i()`.
+#' @param control An `rsv_control` object controlling numerical checks and
+#'   validation behavior.
+#' @param tol_prob Positive numeric scalar giving the tolerance used when
+#'   checking that each subject distribution sums to one.
 #'
-#' @param subj_pre_list list of subject precomputations
-#'        Each element must contain:
-#'          - id
-#'          - lambda_i (length 365)
-#'          - V_i (J x 366 matrix)
-#' @param w_vec numeric vector length 365
-#' @param c_vec numeric vector length 365
-#' @param beta numeric vector length J
-#' @param eta numeric vector length K
-#' @param S_day numeric matrix K x 365
-#' @param control rsv_control object
+#' @return A list with one named numeric vector of length 366 per subject.
+#'   Each vector contains the masses for visit days 1 through 365 followed by
+#'   the no-visit mass.
 #'
-#' @return named list of pmf vectors (one per subject)
+#' @details
+#' Each element of `subj_pre_list` is passed to `pmf_i()` together with the
+#' supplied curve values, coefficients, basis, and numerical controls. The
+#' returned vectors are named `day001` through `day365` and `no_visit`.
 pmf_dataset <- function(subj_pre_list,
                         w_vec,
                         c_vec,
@@ -321,38 +274,52 @@ pmf_dataset <- function(subj_pre_list,
     )
   })
   
-  # ---- Assign names using subject IDs --------------------------------------
-  
-  # Requires rsv_precompute_subject() to be updated with IDs  
-  # names(pmf_list) <- vapply(
-  #   subj_pre_list,
-  #   function(sp) as.character(sp$id),
-  #   character(1)
-  # )
-  
   pmf_list
 }
 
 
-#' Full visit pmf for a single subject (likelihood-consistent)
+#' Construct a visit distribution for one subject
 #'
-#' Returns a named probability vector of length 366:
-#'   day001, ..., day365, no_visit
+#' Constructs the subject-specific distribution over healthcare-visit age and
+#' the no-visit outcome on the 365-day age grid.
 #'
-#' The visit masses are computed using mass_i_visit(),
-#' and the no-visit mass is computed using mass_i_no_visit(),
-#' ensuring full consistency with the likelihood.
+#' @param lambda_i Numeric vector of length 365 containing the
+#'   subject-specific RSV circulation curve.
+#' @param V_i Numeric J x 366 matrix containing the cumulative subject-level
+#'   kernels. Column 1 represents day zero.
+#' @param w_vec Numeric vector of length 365 containing the infection-age
+#'   curve over the daily age grid.
+#' @param c_vec Numeric vector of length 365 containing the healthcare-visit
+#'   curve over the daily age grid.
+#' @param beta Numeric vector of length J containing the infection-age spline
+#'   coefficients.
+#' @param eta Numeric vector of length K containing the healthcare-visit
+#'   spline coefficients. Retained for interface consistency but not used
+#'   directly in the current implementation.
+#' @param S_day Numeric K x 365 matrix containing the healthcare-visit spline
+#'   basis. Retained for interface consistency but not used directly in the
+#'   current implementation.
+#' @param control An `rsv_control` object controlling the optional
+#'   normalization check.
+#' @param tol_prob Positive numeric scalar giving the tolerance for the
+#'   optional sum-to-one check.
 #'
-#' @param lambda_i numeric vector length 365
-#' @param V_i numeric matrix J x 366
-#' @param w_vec numeric vector length 365
-#' @param c_vec numeric vector length 365
-#' @param beta numeric vector length J
-#' @param eta numeric vector length K
-#' @param S_day numeric matrix K x 365
-#' @param control rsv_control object
+#' @return Named numeric vector of length 366 containing the visit-day masses
+#'   for days 1 through 365 followed by the no-visit mass. The entries are
+#'   named `day001` through `day365` and `no_visit`.
 #'
-#' @return named numeric vector length 366 summing to 1
+#' @details
+#' The visit density is evaluated at each of the 365 daily grid points by
+#' `mass_i_visit()`, and these values are used as visit-day masses for
+#' simulation. The no-visit mass is then defined as the remaining mass,
+#' \deqn{
+#'   p_i(\mathrm{no\ visit})
+#'   =
+#'   1 - \sum_{m=1}^{365} p_i(\mathrm{visit\ on\ day}\ m).
+#' }
+#' This complement construction makes normalization part of the simulation
+#' distribution itself. When `control$check_bounds` is `TRUE`, the function
+#' verifies that the resulting 366 entries sum to one within `tol_prob`.
 pmf_i <- function(lambda_i,
                   V_i,
                   w_vec,
@@ -363,8 +330,7 @@ pmf_i <- function(lambda_i,
                   control, 
                   tol_prob = 1e-8) {
   
-  # ---- Visit masses ---------------------------------------------------------
-  
+  # Compute the visit-day masses on the daily grid.
   visit_mass <- mass_i_visit(
     lambda_i = lambda_i,
     V_i      = V_i,
@@ -374,11 +340,8 @@ pmf_i <- function(lambda_i,
     control  = control
   )
   
-  # ---- No-visit mass --------------------------------------------------------
-  
+  # Assign the remaining probability mass to the no-visit outcome.
   tau_mass <- 1 - sum(visit_mass)
-  
-  # ---- Combine --------------------------------------------------------------
   
   pmf <- c(visit_mass, tau_mass)
   
@@ -387,8 +350,7 @@ pmf_i <- function(lambda_i,
     "no_visit"
   )
   
-  # ---- Optional identity check ---------------------------------------------
-  
+  # Check normalization when bound checking is enabled.
   if (isTRUE(control$check_bounds)) {
     
     total <- sum(pmf)
@@ -405,17 +367,35 @@ pmf_i <- function(lambda_i,
 }
 
 
-#' Visit masses on natural scale (vectorized)
+#' Compute visit-day masses
 #'
-#' Computes f_i(m) = lambda_i(m) * c(m) * w(m) * exp(-H_i(m))
-#' for m = 1,...,365.
+#' Evaluates the visit density at the 365 daily grid points used to construct
+#' a subject's simulation distribution. These values are treated as visit-day
+#' masses after exponentiating the output of `logmass_i_visit()`.
 #'
-#' This is a thin wrapper around logmass_i_visit() that
-#' exponentiates the log-masses.
+#' @param lambda_i Numeric vector of length 365 containing the
+#'   subject-specific RSV circulation curve.
+#' @param V_i Numeric J x 366 matrix containing the cumulative subject-level
+#'   kernels. Column 1 represents day zero.
+#' @param w_vec Numeric vector of length 365 containing the infection-age
+#'   curve over the daily age grid.
+#' @param c_vec Numeric vector of length 365 containing the healthcare-visit
+#'   curve over the daily age grid.
+#' @param beta Numeric vector of length J containing the infection-age spline
+#'   coefficients.
+#' @param control An `rsv_control` object retained for interface consistency
+#'   but not used directly in the current implementation.
 #'
-#' @inheritParams logmass_i_visit
+#' @return Numeric vector of length 365 containing the visit-day masses.
 #'
-#' @return numeric vector length 365 of visit masses
+#' @details
+#' For age day \eqn{m}, the visit quantity is
+#' \deqn{
+#'   f_i^{\mathrm{visit}}(m)
+#'   =
+#'   c(m)\lambda_i(m)w(m)\exp\{-H_i(m)\}.
+#' }
+#' These daily-grid values are used as visit-day masses by `pmf_i()`.
 mass_i_visit <- function(lambda_i,
                          V_i,
                          w_vec,
@@ -436,44 +416,53 @@ mass_i_visit <- function(lambda_i,
 }
 
 
-#   This functions disregard the functions from past implementations
-#   including V2. 
-# The main change in V4 was to compute the no visit probability
-#   using the complement
-#   NOTE: These functions also didn't work.
-#   NOTE: The function worked with the w curve derived from Chris data.
-#   NOTE: While testing, I discovered that using the functions in 
-#     the likelihood don't yield a pmf since the sum is off 1. My
-#     explanations lies within the implementation of the likelihood
-#     in such a way that it is a dot product of beta and eta
-
-#' Log visit-mass for all days (vectorized)
+#' Compute log visit-day masses
 #'
-#' Computes log f_i(m) for m = 1,...,365, where
+#' Computes the log visit quantity at each of the 365 daily grid points used
+#' to construct a subject's simulation distribution.
 #'
-#'   f_i(m) = lambda_i(m) * c(m) * w(m) * exp(-H_i(m)),
+#' @param lambda_i Numeric vector of length 365 containing the strictly
+#'   positive subject-specific RSV circulation curve.
+#' @param V_i Numeric J x 366 matrix containing the cumulative subject-level
+#'   kernels. Column 1 represents day zero, and column `m + 1` represents
+#'   \eqn{v_i(m)}.
+#' @param w_vec Numeric vector of length 365 containing the strictly positive
+#'   infection-age curve over the daily age grid.
+#' @param c_vec Numeric vector of length 365 containing the strictly positive
+#'   healthcare-visit curve over the daily age grid.
+#' @param beta Numeric vector of length J containing the infection-age spline
+#'   coefficients.
+#' @param control An `rsv_control` object retained for interface consistency
+#'   but not used directly in the current implementation.
 #'
-#' and H_i(m) = beta^T V_i[, m+1].
+#' @return Numeric vector of length 365 containing the log visit-day masses.
 #'
-#' This function is intended for pmf construction and restores
-#' the lambda term omitted in loglik_i_visit() for optimization.
-#'
-#' @param lambda_i numeric vector length 365
-#' @param V_i numeric matrix J x 366
-#' @param w_vec numeric vector length 365
-#' @param c_vec numeric vector length 365
-#' @param beta numeric vector length J
-#' @param control rsv_control object
-#'
-#' @return numeric vector length 365 of log visit-masses
+#' @details
+#' For age day \eqn{m}, the function evaluates
+#' \deqn{
+#'   \log f_i^{\mathrm{visit}}(m)
+#'   =
+#'   \log c(m)
+#'   +
+#'   \log \lambda_i(m)
+#'   +
+#'   \log w(m)
+#'   -
+#'   H_i(m),
+#' }
+#' where
+#' \deqn{
+#'   H_i(m) = \beta^\top v_i(m).
+#' }
+#' The resulting event-time density values are used as visit-day masses in the
+#' simulation distribution. Unlike the optimization objective for an observed
+#' visit, this calculation retains the known \eqn{\log \lambda_i(m)} term.
 logmass_i_visit <- function(lambda_i,
                             V_i,
                             w_vec,
                             c_vec,
                             beta,
                             control) {
-  
-  # ---- Basic shape checks (done once, not per-day) -------------------------
   
   if (!is.numeric(lambda_i) || length(lambda_i) != 365L) {
     stop("lambda_i must be numeric vector length 365.")
@@ -495,8 +484,7 @@ logmass_i_visit <- function(lambda_i,
     stop("c_vec must be numeric vector length 365.")
   }
   
-  # ---- Optional positivity check (cheap safety) ----------------------------
-  
+  # Require finite positive values before applying logarithms.
   if (any(lambda_i <= 0 | !is.finite(lambda_i))) {
     stop("lambda_i must be strictly positive and finite.")
   }
@@ -509,16 +497,14 @@ logmass_i_visit <- function(lambda_i,
     stop("c_vec must be strictly positive and finite.")
   }
   
-  # ---- Integrated hazard H_i(m) = beta^T V_i[, m+1] ------------------------
-  
+  # Compute H_i(m) = beta^T v_i(m) for days 1 through 365.
   H_vec <- drop(crossprod(beta, V_i[, 2:366, drop = FALSE]))
   
   if (any(!is.finite(H_vec))) {
     stop("Non-finite integrated hazard values detected.")
   }
   
-  # ---- Log visit masses -----------------------------------------------------
-  
+  # Evaluate the full log visit-density expression on the daily grid.
   log_mass_vec <-
     log(lambda_i) +
     log(c_vec) +
@@ -529,181 +515,51 @@ logmass_i_visit <- function(lambda_i,
 }
 
 
-#' No-visit mass on natural scale (likelihood-consistent)
-#'
-#' Computes tau_i(beta, eta) on the natural scale using the exact
-#' same computational pathway as loglik_i_no_visit().
-#'
-#' This is a thin wrapper around logmass_i_no_visit().
-#'
-#' @inheritParams logmass_i_no_visit
-#'
-#' @return numeric scalar tau_i
-mass_i_no_visit <- function(lambda_i,
-                            V_i,
-                            w_vec,
-                            beta,
-                            eta,
-                            S_day,
-                            control) {
-  
-  log_tau <- logmass_i_no_visit(
-    lambda_i = lambda_i,
-    V_i      = V_i,
-    w_vec    = w_vec,
-    beta     = beta,
-    eta      = eta,
-    S_day    = S_day,
-    control  = control
-  )
-  
-  exp(log_tau)
-}
+# Visit outcome sampling ---------------------------------------------------
 
 
-#' Log no-visit mass (vectorized, likelihood-consistent)
+#' Sample healthcare-visit outcomes
 #'
-#' Computes log tau_i(beta, eta) using the exact same computational
-#' pathway as loglik_i_no_visit(), but intended for pmf construction.
+#' Samples one healthcare-visit outcome for each subject from a corresponding
+#' subject-specific visit distribution and records the sampled visit age in
+#' the RSV data object.
 #'
-#' @param lambda_i numeric vector length 365
-#' @param V_i numeric matrix J x 366
-#' @param w_vec numeric vector length 365
-#' @param beta numeric vector length J
-#' @param eta numeric vector length K
-#' @param S_day numeric matrix K x 365
-#' @param control rsv_control object
+#' @param data An `rsv_data` object containing the subjects whose
+#'   healthcare-visit outcomes will be simulated.
+#' @param visit_dist_list List of subject-specific visit distributions, with
+#'   one numeric vector per subject. The first D entries represent visit days
+#'   1 through D, and the final entry represents the no-visit outcome.
+#' @param seed Integer scalar or `NULL`. If supplied, it is passed to
+#'   `set.seed()` before sampling.
+#' @param return_vectors Logical scalar indicating whether to return the
+#'   sampled visit-age and visit-indicator vectors with the updated data.
 #'
-#' @return numeric scalar log(tau_i)
-logmass_i_no_visit <- function(lambda_i,
-                               V_i,
-                               w_vec,
-                               beta,
-                               eta,
-                               S_day,
-                               control) {
-  
-  # ---- Basic shape checks ---------------------------------------------------
-  
-  if (!is.numeric(lambda_i) || length(lambda_i) != 365L) {
-    stop("lambda_i must be numeric vector length 365.")
-  }
-  
-  if (!is.matrix(V_i) || !is.numeric(V_i) || ncol(V_i) != 366L) {
-    stop("V_i must be numeric matrix with 366 columns.")
-  }
-  
-  if (!is.numeric(beta) || length(beta) != nrow(V_i)) {
-    stop("Length of beta must equal nrow(V_i).")
-  }
-  
-  if (!is.numeric(w_vec) || length(w_vec) != 365L) {
-    stop("w_vec must be numeric vector length 365.")
-  }
-  
-  if (!is.numeric(eta)) {
-    stop("eta must be numeric.")
-  }
-  
-  if (!is.matrix(S_day) && !inherits(S_day, "Matrix")) {
-    stop("S_day must be a numeric matrix (or Matrix).")
-  }
-  
-  if (!is.numeric(S_day) || ncol(S_day) != 365L) {
-    stop("S_day must be numeric matrix with 365 columns.")
-  }
-  
-  if (length(eta) != nrow(S_day)) {
-    stop("Length of eta must equal nrow(S_day).")
-  }
-  
-  if (!inherits(control, "rsv_control") && !is.list(control)) {
-    stop("control must be an 'rsv_control' object (or compatible list).")
-  }
-  
-  check_bounds <- isTRUE(control$check_bounds)
-  warn_on_clip <- isTRUE(control$warn_on_clip)
-  eps_tau      <- if (!is.null(control$eps_tau)) control$eps_tau else 1e-12
-  
-  # ---- 1) Survival ----------------------------------------------------------
-  
-  Fbar <- Fbar_i(
-    beta         = beta,
-    V_i          = V_i,
-    include_day0 = TRUE,
-    check_bounds = check_bounds,
-    warn_on_clip = warn_on_clip
-  )
-  
-  if (!is.numeric(Fbar) || length(Fbar) != 366L) {
-    stop("Fbar_i() must return numeric vector length 366.")
-  }
-  
-  # ---- 2) Per-day infection probabilities ----------------------------------
-  
-  pi <- pi_from_w(
-    lambda_shift_i = lambda_i,
-    w              = w_vec,
-    check_bounds   = check_bounds,
-    warn_on_clip   = warn_on_clip
-  )
-  
-  if (!is.numeric(pi) || length(pi) != 365L) {
-    stop("pi_from_w() must return numeric vector length 365.")
-  }
-  
-  # ---- 3) Visit kernel Q_i --------------------------------------------------
-  
-  Q <- Q_i(
-    Fbar_i      = Fbar,
-    pi_i        = pi,
-    check_bounds = check_bounds,
-    warn_on_clip = warn_on_clip
-  )
-  
-  if (!is.numeric(Q) || length(Q) != 365L) {
-    stop("Q_i() must return numeric vector length 365.")
-  }
-  
-  # ---- 4) Aggregated kernel U_i --------------------------------------------
-  
-  U <- U_i(
-    Q_i         = Q,
-    S_day       = S_day,
-    check_bounds = check_bounds,
-    warn_on_clip = warn_on_clip
-  )
-  
-  if (!is.numeric(U) || length(U) != length(eta)) {
-    stop("U_i() must return numeric vector same length as eta.")
-  }
-  
-  # ---- 5) tau_i and log -----------------------------------------------------
-  
-  tau <- tau_i(
-    U_i         = U,
-    eta         = eta,
-    eps_tau     = eps_tau,
-    check_bounds = check_bounds,
-    warn_on_clip = warn_on_clip
-  )
-  
-  if (!is.numeric(tau) || length(tau) != 1L ||
-      !is.finite(tau) || tau <= 0) {
-    stop("tau_i() must return a single positive finite scalar.")
-  }
-  
-  log(tau)
-}
-
-
+#' @return If `return_vectors = FALSE`, an `rsv_data` object with each
+#'   subject's `visit_age` updated to the sampled visit day or `NA_integer_`
+#'   for no visit.
+#'
+#'   If `return_vectors = TRUE`, a named list containing:
+#' \describe{
+#'   \item{\code{data}}{The updated `rsv_data` object.}
+#'   \item{\code{visit_age}}{Integer vector containing the sampled visit ages,
+#'     with `NA_integer_` for subjects with no visit.}
+#'   \item{\code{I_visit}}{Integer vector containing 1 for subjects with a
+#'     sampled visit and 0 for subjects with no visit.}
+#' }
+#'
+#' @details
+#' The number of modeled visit days D is inferred from the first distribution.
+#' For each subject, a categorical outcome is sampled from the corresponding
+#' distribution. Outcomes 1 through D are recorded as healthcare-visit ages,
+#' while the final category is recorded as no visit.
+#'
+#' All subject-specific distributions must have the same length and contain
+#' finite probability masses with positive total mass.
 sample_visits_from_distribution <- function(data,
                                             visit_dist_list,
                                             seed = NULL,
                                             return_vectors = FALSE) {
-  # -----------------
-  # Basic validation
-  # -----------------
+  
   stopifnot(inherits(data, "rsv_data"))
   stopifnot(is.list(data$subjects), length(data$subjects) >= 1L)
   stopifnot(is.list(visit_dist_list))
@@ -716,23 +572,20 @@ sample_visits_from_distribution <- function(data,
     set.seed(seed)
   }
   
-  # Infer number of days from first distribution
+  # Infer the number of visit days from the first distribution.
   first_dist <- visit_dist_list[[1]]
   stopifnot(is.numeric(first_dist), length(first_dist) >= 2L)
   
-  D <- length(first_dist) - 1L  # last entry = no visit
+  # Reserve the final category for the no-visit outcome.
+  D <- length(first_dist) - 1L  
   
-  # Storage
   visit_age <- rep(NA_integer_, n)
   I_visit   <- integer(n)
   
-  # -----------------
-  # Main sampling loop
-  # -----------------
   for (i in seq_len(n)) {
     p_i <- visit_dist_list[[i]]
     
-    # ---- Defensive checks (no renormalization) ----
+    # Validate each supplied distribution before sampling.
     if (!is.numeric(p_i)) {
       stop(sprintf("visit_dist_list[[%d]] is not numeric.", i))
     }
@@ -760,16 +613,10 @@ sample_visits_from_distribution <- function(data,
       ))
     }
     
-    # if (abs(s - 1) > 1e-10) {
-    #   stop(sprintf(
-    #     "visit_dist_list[[%d]] does not sum to 1 (sum=%.16f).",
-    #     i, s
-    #   ))
-    # }
-    
-    # ---- Draw categorical sample ----
+    # Sample one categorical outcome.
     k <- sample.int(D + 1L, size = 1L, prob = p_i)
     
+    # Map visit-day outcomes to ages and the final category to no visit.
     if (k <= D) {
       visit_age[i] <- as.integer(k)
       I_visit[i]   <- 1L
@@ -778,11 +625,10 @@ sample_visits_from_distribution <- function(data,
       I_visit[i]   <- 0L
     }
     
-    # Update subject record
     data$subjects[[i]]$visit_age <- visit_age[i]
   }
   
-  # Preserve class explicitly (defensive)
+  # Preserve the rsv_data class explicitly.
   class(data) <- unique(c("rsv_data", class(data)))
   
   if (return_vectors) {
