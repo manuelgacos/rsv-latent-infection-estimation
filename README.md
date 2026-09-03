@@ -115,7 +115,7 @@ install.packages("splines2")
 From a terminal opened in the project root, run:
 
 ```bash
-Rscript run_example.R
+Rscript example/run_example.R
 ```
 
 Alternatively, open the project in an R environment such as RStudio, confirm that the working directory is the repository root, and run:
