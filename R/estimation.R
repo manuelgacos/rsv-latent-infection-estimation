@@ -1,30 +1,45 @@
-#' Gradient of total log-likelihood with respect to beta (fast version)
+# Estimation
+#
+# Implements analytic gradients, penalized objective gradients, blockwise
+# optimization, alternating estimation, and initialization for the RSV model.
+
+
+# Likelihood gradients -----------------------------------------------------
+
+
+#' Compute the log-likelihood gradient with respect to beta
 #'
-#' Computes the analytic gradient of the total (weighted) log-likelihood
-#' \eqn{\ell(\beta,\eta)} with respect to the infection-age parameter vector
-#' \eqn{\beta}, using a vectorized implementation for the no-visit (I2) case.
+#' Computes the analytic gradient of the total weighted log-likelihood with
+#' respect to the infection-age spline coefficients, holding the
+#' healthcare-visit coefficients fixed. The no-visit contribution is
+#' evaluated using matrix-vector products for efficient repeated estimation.
 #'
-#' This function is algebraically equivalent to \code{\link{grad_beta}},
-#' but replaces the per-day loop in the I2 term with matrix–vector products,
-#' resulting in substantially improved performance for large datasets or
-#' large basis dimensions.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients, held fixed in this gradient.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases and
+#'   seasonal RSV circulation curve.
+#' @param control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list Optional list of subject-level precomputations, with
+#'   one element per subject. If `NULL`, the precomputations are constructed
+#'   internally.
+#'
+#' @return Numeric vector of length `J` containing the gradient of the total
+#'   weighted log-likelihood with respect to \eqn{\beta}.
 #'
 #' @details
-#' The gradient is computed by summing per-subject contributions,
-#' weighted by \code{subject_i$weight}, and split into two cases:
-#'
-#' \strong{Visit case (I1):}
-#' If subject \eqn{i} has a visit at age \eqn{L_i},
+#' The gradient is the weighted sum of subject-level contributions. For a
+#' subject with a healthcare visit at age \eqn{L_i},
 #' \deqn{
 #'   \nabla_\beta \ell_i
 #'   =
-#'   \frac{b(L_i)}{w(L_i;\beta)} - v_i(L_i),
+#'   \frac{b(L_i)}{w(L_i;\beta)} - v_i(L_i).
 #' }
-#' where \eqn{b(L_i)} is the day-basis vector, \eqn{w(L_i;\beta) = \beta^\top b(L_i)},
-#' and \eqn{v_i(L_i)} is the cumulative kernel at age \eqn{L_i}.
 #'
-#' \strong{No-visit case (I2):}
-#' If subject \eqn{i} has no visit in the first year of life,
+#' For a subject with no healthcare visit during the first year of life,
 #' \deqn{
 #'   \nabla_\beta \ell_i
 #'   =
@@ -32,70 +47,24 @@
 #'   \sum_{m=1}^{365}
 #'   c(m;\eta)
 #'   \left[
-#'     \bar F_i(m;\beta)\,\lambda_i(m)\,b(m)
+#'     \bar F_i(m;\beta)\lambda_i(m)b(m)
 #'     -
-#'     Q_i(m;\beta)\,v_i(m-1)
-#'   \right],
-#' }
-#' where:
-#' \itemize{
-#'   \item \eqn{\bar F_i(m;\beta)} is the survival probability up to day \eqn{m},
-#'   \item \eqn{\lambda_i(m)} is the subject-specific circulation curve,
-#'   \item \eqn{Q_i(m;\beta) = \bar F_i(m-1;\beta)\,\pi_i(m;\beta)} is the
-#'         infection-day mass,
-#'   \item \eqn{\tau_i(\beta,\eta) = 1 - \sum_m c(m;\eta)\,Q_i(m;\beta)} is the
-#'         probability of no visit.
+#'     Q_i(m;\beta)v_i(m-1)
+#'   \right].
 #' }
 #'
-#' The inner sum is evaluated efficiently using matrix–vector products:
-#' \itemize{
-#'   \item \code{B_day \%*\% a}, with \eqn{a(m) = c(m)\,\bar F_i(m)\,\lambda_i(m)},
-#'   \item \code{V_i[,1:365] \%*\% b}, with \eqn{b(m) = c(m)\,Q_i(m)}.
-#' }
-#'
-#' @section Numerical considerations:
-#' This function reuses the same numerical safeguards as the likelihood:
-#' \itemize{
-#'   \item The vectors \code{w_vec} and \code{c_vec} are obtained from
-#'         \code{\link{rsv_precompute_global}}, which enforces nonnegativity
-#'         and log-safety via \code{control$eps_log}.
-#'   \item The no-visit probability \eqn{\tau_i} is clipped below by
-#'         \code{control$eps_tau} to avoid numerical instability.
-#'   \item Clipping operations are treated as fixed for differentiation;
-#'         the returned gradient corresponds to the analytic derivative of
-#'         the unclipped likelihood.
-#' }
-#'
-#' @param beta Numeric vector of length \eqn{J}. Infection-age basis coefficients.
-#' @param eta Numeric vector of length \eqn{K}. Visit-age basis coefficients
-#'   (held fixed in this gradient).
-#' @param data An \code{"rsv_data"} object containing the subject list.
-#' @param model An \code{"rsv_model"} object containing the basis matrices
-#'   and circulation curve.
-#' @param control An \code{"rsv_control"} object controlling numerical checks,
-#'   clipping behavior, and tolerance parameters.
-#' @param subj_pre_list Optional list of subject-level precomputations,
-#'   typically the output of \code{\link{rsv_precompute_subject}} for each subject.
-#'   If \code{NULL}, subject-level quantities are computed internally.
-#'
-#' @return A numeric vector of length \eqn{J} giving the gradient
-#'   \eqn{\nabla_\beta \ell(\beta,\eta)} of the total (weighted) log-likelihood.
-#'
-#' @seealso
-#'   \code{\link{grad_beta}},
-#'   \code{\link{grad_negloglik_beta}},
-#'   \code{\link{rsv_loglik}},
-#'   \code{\link{rsv_precompute_global}},
-#'   \code{\link{rsv_precompute_subject}}
-#'
-#' @export
+#' The no-visit sum is evaluated using matrix-vector products involving
+#' `model$B_day` and the first 365 columns of `V_i`. The daily curves use the
+#' numerical safeguards applied by `rsv_precompute_global()`, and
+#' \eqn{\tau_i} is bounded below by `control$eps_tau`. Numerical clipping is
+#' treated as fixed when forming the analytic gradient.
 grad_beta_fast <- function(beta,
                            eta,
                            data,
                            model,
                            control = make_rsv_control(),
                            subj_pre_list = NULL) {
-  # --- basic checks ---
+  
   stopifnot(is.numeric(beta), all(is.finite(beta)))
   stopifnot(is.numeric(eta),  all(is.finite(eta)))
   stopifnot(!is.null(data$subjects), is.list(data$subjects))
@@ -110,12 +79,12 @@ grad_beta_fast <- function(beta,
   n_subj   <- length(subjects)
   J        <- length(beta)
   
-  # --- global precompute: w_vec, c_vec ---
+  # Precompute coefficient-dependent curves once for all subjects.
   glob  <- rsv_precompute_global(beta = beta, eta = eta, model = model, control = control)
   w_vec <- glob$w_vec
   c_vec <- glob$c_vec
   
-  # --- subject precompute if needed ---
+  # Reuse supplied subject precomputations or construct them once.
   if (is.null(subj_pre_list)) {
     subj_pre_list <- lapply(subjects, rsv_precompute_subject, model = model, control = control)
   } else {
@@ -133,15 +102,13 @@ grad_beta_fast <- function(beta,
       stop("subject weight must be finite scalar.")
     }
     
-    lambda_i <- pre$lambda_i        # length 365
-    V_i      <- pre$V_i             # J x 366
+    lambda_i <- pre$lambda_i        
+    V_i      <- pre$V_i             
     
     L_i <- subj$visit_age
     
     if (!is.na(L_i)) {
-      # -------------------------
-      # I1 term: b(L)/w(L) - v(L)
-      # -------------------------
+      # I1: visit contribution b(L) / w(L) - v(L).
       L_i <- as.integer(L_i)
       b_L <- B_day[, L_i]
       w_L <- w_vec[L_i]
@@ -154,9 +121,7 @@ grad_beta_fast <- function(beta,
       grad <- grad + weight * ((b_L / w_L) - v_L)
       
     } else {
-      # -------------------------
-      # I2 term (vectorized inner)
-      # -------------------------
+      # I2: evaluate the no-visit contribution with matrix-vector products.
       Fbar <- Fbar_i(
         beta         = beta,
         V_i          = V_i,
@@ -181,18 +146,21 @@ grad_beta_fast <- function(beta,
       
       g_i <- sum(c_vec * Q)
       tau <- 1 - g_i
+      
+      # Bound tau away from zero before division in the no-visit gradient.
       tau <- .clip_to_range(
         tau, lower = eps_tau, upper = 1.0, name = "tau_i",
         check_bounds = check_bounds, warn_on_clip = warn_on_clip
       )
       
-      # a[m] = c(m) * Fbar(m) * lambda_i(m)  where Fbar(m) = Fbar[m+1]
-      a <- c_vec * (Fbar[2:366] * lambda_i)  # length 365
+      # a[m] = c(m) * Fbar(m) * lambda_i(m), with
+      # Fbar(m) = Fbar[m + 1].
+      a <- c_vec * (Fbar[2:366] * lambda_i)
       
-      # b[m] = c(m) * Q(m)
-      b <- c_vec * Q                         # length 365
+      # b[m] = c(m) * Q(m).
+      b <- c_vec * Q                        
       
-      # inner = B_day %*% a - V_i[,1:365] %*% b   (both yield length J)
+      # Combine the two J-dimensional terms in the no-visit gradient sum.
       inner <- as.vector(B_day %*% a) - as.vector(V_i[, 1:365, drop = FALSE] %*% b)
       
       grad <- grad + weight * (-(1 / tau)) * inner
@@ -203,18 +171,27 @@ grad_beta_fast <- function(beta,
 }
 
 
-#' Gradient of negative log-likelihood w.r.t. beta
+#' Compute the negative log-likelihood gradient with respect to beta
 #'
-#' Wrapper around grad_beta_fast() that returns the gradient of
-#' the *negative* log-likelihood.
+#' Returns the gradient of the negative total weighted log-likelihood with
+#' respect to the infection-age spline coefficients. This is the
+#' sign-reversed gradient returned by `grad_beta_fast()`.
 #'
-#' @param beta numeric vector of length J
-#' @param eta  numeric vector of length K (held fixed)
-#' @param data rsv_data
-#' @param model rsv_model
-#' @param control rsv_control
-#' @param subj_pre_list optional precomputed subject list (lambda_i, V_i)
-#' @return numeric vector of length J (negative gradient)
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients, held fixed in this gradient.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases and
+#'   seasonal RSV circulation curve.
+#' @param control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list Optional list of subject-level precomputations, with
+#'   one element per subject. If `NULL`, the precomputations are constructed
+#'   internally by `grad_beta_fast()`.
+#'
+#' @return Numeric vector of length `J` containing the gradient of the
+#'   negative total weighted log-likelihood with respect to \eqn{\beta}.
 grad_negloglik_beta <- function(beta,
                                 eta,
                                 data,
@@ -232,79 +209,33 @@ grad_negloglik_beta <- function(beta,
 }
 
 
-#' Gradient of the negative log-likelihood w.r.t. beta
+#' Compute the beta gradient for optimization
 #'
-#' Computes the gradient of the **negative** total log-likelihood with respect
-#' to the infection-age parameter vector \eqn{\beta}, holding \eqn{\eta} fixed.
+#' Evaluates the gradient of the negative total weighted log-likelihood with
+#' respect to the infection-age spline coefficients. This optimizer-facing
+#' wrapper delegates the calculation to `grad_negloglik_beta()`.
 #'
-#' This is a lightweight wrapper around
-#' \code{\link{grad_negloglik_beta}} intended for use with numerical
-#' optimization routines such as \code{\link{optim}}. It assumes that all
-#' subject-level precomputations (i.e., \code{lambda_i} and \code{V_i}) have
-#' already been performed and are supplied via \code{subj_pre_list}.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients, held fixed in this gradient.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases and
+#'   seasonal RSV circulation curve.
+#' @param rsv_control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization. The argument name avoids conflict with the
+#'   `control` argument used by `optim()`.
+#' @param subj_pre_list List of subject-level precomputations, with one element
+#'   per subject.
 #'
-#' No additional validation or recomputation is performed beyond what is
-#' handled internally by \code{grad_negloglik_beta()}.
-#'
-#' @param beta Numeric vector of length \eqn{J}. Infection-age parameter
-#'   coefficients at which the gradient is evaluated.
-#'
-#' @param eta Numeric vector of length \eqn{K}. Visit-age parameter coefficients,
-#'   treated as fixed in this gradient computation.
-#'
-#' @param data An \code{"rsv_data"} object containing the list of subjects.
-#'
-#' @param model An \code{"rsv_model"} object containing the global model
-#'   components (basis matrices, circulation curve, etc.).
-#'
-#' @param rsv_control An \code{"rsv_control"} object governing numerical
-#'   safeguards such as bound checking, clipping, and log-stabilization.
-#'   This argument is named \code{rsv_control} to avoid clashes with the
-#'   \code{control} argument used by \code{\link{optim}}.
-#'
-#' @param subj_pre_list A list of subject-level precomputations, typically
-#'   produced by \code{\link{rsv_precompute_subject}}. Each element must contain
-#'   at least:
-#'   \itemize{
-#'     \item \code{lambda_i} – subject-shifted circulation curve;
-#'     \item \code{V_i}      – cumulative kernel matrix.
-#'   }
-#'   The list must have the same length and ordering as \code{data$subjects}.
-#'
-#' @return A numeric vector of length \eqn{J} giving the gradient of the
-#'   **negative** total log-likelihood with respect to \eqn{\beta}.
-#'
-#' @details
-#' This function is designed to be passed directly as the \code{gr} argument
-#' to \code{\link{optim}} when optimizing over \eqn{\beta}:
-#' \preformatted{
-#' optim(par = beta_init,
-#'       fn  = obj_negloglik_beta,
-#'       gr  = obj_grad_negloglik_beta,
-#'       ...)
-#' }
-#'
-#' It is mathematically consistent with:
-#' \itemize{
-#'   \item \code{\link{obj_negloglik_beta}};
-#'   \item \code{\link{grad_beta_fast}};
-#'   \item \code{\link{rsv_negloglik}}.
-#' }
-#'
-#' @seealso
-#'   \code{\link{obj_negloglik_beta}},
-#'   \code{\link{grad_beta_fast}},
-#'   \code{\link{grad_negloglik_beta}},
-#'   \code{\link{rsv_loglik}}
-#'
-#' @export
+#' @return Numeric vector of length `J` containing the gradient of the
+#'   negative total weighted log-likelihood with respect to \eqn{\beta}.
 obj_grad_negloglik_beta <- function(beta,
                                     eta,
                                     data,
                                     model,
                                     rsv_control,
                                     subj_pre_list) {
-  # --- basic checks (fail fast, cheap) ---
   stopifnot(is.numeric(beta), all(is.finite(beta)))
   stopifnot(is.list(subj_pre_list))
   stopifnot(length(subj_pre_list) == length(data$subjects))
@@ -320,53 +251,57 @@ obj_grad_negloglik_beta <- function(beta,
 }
 
 
-#' Gradient of total log-likelihood with respect to eta (fast version)
+#' Compute the log-likelihood gradient with respect to eta
 #'
-#' Computes the analytic gradient of the total (weighted) log-likelihood
-#' \eqn{\ell(\beta,\eta)} with respect to the visit-age parameter vector
-#' \eqn{\eta}, using a vectorized implementation for the no-visit (I2) case.
+#' Computes the analytic gradient of the total weighted log-likelihood with
+#' respect to the healthcare-visit spline coefficients, holding the
+#' infection-age coefficients fixed. The no-visit contribution is evaluated
+#' using a matrix-vector product for efficient repeated estimation.
+#'
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients, held fixed in this gradient.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases and
+#'   seasonal RSV circulation curve.
+#' @param control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list Optional list of subject-level precomputations, with
+#'   one element per subject. If `NULL`, the precomputations are constructed
+#'   internally.
+#'
+#' @return Numeric vector of length `K` containing the gradient of the total
+#'   weighted log-likelihood with respect to \eqn{\eta}.
 #'
 #' @details
-#' Visit case (I1):
-#'   If subject i has a visit at age L_i,
-#'   \deqn{
-#'     \nabla_\eta \ell_i = s(L_i) / c(L_i;\eta),
-#'   }
-#'   where s(L_i) is the visit-age basis vector and
-#'   c(L_i;\eta) = \eta^\top s(L_i).
+#' The gradient is the weighted sum of subject-level contributions. For a
+#' subject with a healthcare visit at age \eqn{L_i},
+#' \deqn{
+#'   \nabla_\eta \ell_i
+#'   =
+#'   \frac{s(L_i)}{c(L_i;\eta)}.
+#' }
 #'
-#' No-visit case (I2):
-#'   If subject i has no visit in the first year of life,
-#'   \deqn{
-#'     \nabla_\eta \ell_i
-#'     =
-#'     -\frac{1}{\tau_i(\beta,\eta)}
-#'     \sum_{m=1}^{365} s(m)\, Q_i(m;\beta),
-#'   }
-#'   where \eqn{\tau_i = 1 - \sum_m c(m;\eta)\, Q_i(m;\beta)}.
+#' For a subject with no healthcare visit during the first year of life,
+#' \deqn{
+#'   \nabla_\eta \ell_i
+#'   =
+#'   -\frac{1}{\tau_i(\beta,\eta)}
+#'   \sum_{m=1}^{365}
+#'   s(m)Q_i(m;\beta).
+#' }
 #'
-#' The inner sum is evaluated efficiently as
-#'   \code{S_day \%*\% Q},
-#' where \code{S_day} is the K x 365 visit-age basis matrix.
-#'
-#' @param beta Numeric vector of length J. Infection-age basis coefficients
-#'   (held fixed in this gradient).
-#' @param eta Numeric vector of length K. Visit-age basis coefficients.
-#' @param data An \code{"rsv_data"} object containing the subject list.
-#' @param model An \code{"rsv_model"} object containing basis matrices.
-#' @param control An \code{"rsv_control"} object controlling numerical checks.
-#' @param subj_pre_list Optional list of subject-level precomputations.
-#'
-#' @return Numeric vector of length K giving \eqn{\nabla_\eta \ell(\beta,\eta)}.
-#'
-#' @export
+#' The no-visit sum is evaluated as `model$S_day %*% Q`. The daily
+#' healthcare-visit curve uses the numerical safeguards applied by
+#' `rsv_precompute_global()`, and \eqn{\tau_i} is bounded below by
+#' `control$eps_tau`.
 grad_eta_fast <- function(beta,
                           eta,
                           data,
                           model,
                           control = make_rsv_control(),
                           subj_pre_list = NULL) {
-  # --- basic checks ---
   stopifnot(is.numeric(beta), all(is.finite(beta)))
   stopifnot(is.numeric(eta),  all(is.finite(eta)))
   stopifnot(!is.null(data$subjects), is.list(data$subjects))
@@ -381,12 +316,12 @@ grad_eta_fast <- function(beta,
   n_subj   <- length(subjects)
   K        <- length(eta)
   
-  # --- global precompute: w_vec, c_vec ---
+  # Precompute coefficient-dependent curves once for all subjects.
   glob  <- rsv_precompute_global(beta = beta, eta = eta, model = model, control = control)
-  w_vec <- glob$w_vec   # needed for Q in I2
-  c_vec <- glob$c_vec   # stabilized visit weights
+  w_vec <- glob$w_vec   
+  c_vec <- glob$c_vec   
   
-  # --- subject precompute if needed ---
+  # Reuse supplied subject precomputations or construct them once.
   if (is.null(subj_pre_list)) {
     subj_pre_list <- lapply(subjects, rsv_precompute_subject,
                             model = model, control = control)
@@ -395,7 +330,8 @@ grad_eta_fast <- function(beta,
   }
   
   grad  <- rep(0.0, K)
-  S_day <- model$S_day  # K x 365
+  # Healthcare-visit basis with K rows and 365 age-day columns.
+  S_day <- model$S_day
   
   for (i in seq_len(n_subj)) {
     subj   <- subjects[[i]]
@@ -412,9 +348,7 @@ grad_eta_fast <- function(beta,
     L_i <- subj$visit_age
     
     if (!is.na(L_i)) {
-      # -------------------------
-      # I1 term: s(L) / c(L)
-      # -------------------------
+      # I1: visit contribution s(L) / c(L).
       L_i <- as.integer(L_i)
       
       s_L <- S_day[, L_i]
@@ -433,11 +367,9 @@ grad_eta_fast <- function(beta,
       grad <- grad + weight * (s_L / c_L)
       
     } else {
-      # -------------------------
-      # I2 term (vectorized)
-      # -------------------------
+      # I2: evaluate the no-visit contribution with a matrix-vector product.
       
-      # Compute Fbar, pi, Q (same helpers as likelihood)
+      # Reuse the likelihood quantities needed for the no-visit gradient.
       Fbar <- Fbar_i(
         beta         = beta,
         V_i          = V_i,
@@ -460,17 +392,17 @@ grad_eta_fast <- function(beta,
         warn_on_clip = warn_on_clip
       )
       
-      # g_i = sum_m c(m) Q(m)
+      # g_i = sum_m c(m) Q(m).
       g_i <- sum(c_vec * Q)
       
       tau <- 1 - g_i
+      # Bound tau away from zero before division in the no-visit gradient.
       tau <- .clip_to_range(
         tau, lower = eps_tau, upper = 1.0, name = "tau_i",
         check_bounds = check_bounds, warn_on_clip = warn_on_clip
       )
       
-      # U_i(beta) = sum_m s(m) Q(m)
-      # (Could be precomputed for eta-only optimization in a future version.)
+      # U_i(beta) = sum_m s(m) * Q(m).
       U <- as.vector(S_day %*% Q)
       
       grad <- grad + weight * (-(1 / tau) * U)
@@ -483,20 +415,27 @@ grad_eta_fast <- function(beta,
 }
 
 
-#' Gradient of negative log-likelihood w.r.t. eta
+#' Compute the negative log-likelihood gradient with respect to eta
 #'
-#' Wrapper around grad_eta_fast() that returns the gradient of
-#' the *negative* log-likelihood.
+#' Returns the gradient of the negative total weighted log-likelihood with
+#' respect to the healthcare-visit spline coefficients. This is the
+#' sign-reversed gradient returned by `grad_eta_fast()`.
 #'
-#' @param beta numeric vector of length J (held fixed)
-#' @param eta  numeric vector of length K
-#' @param data rsv_data
-#' @param model rsv_model
-#' @param control rsv_control
-#' @param subj_pre_list optional precomputed subject list
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients, held fixed in this gradient.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases and
+#'   seasonal RSV circulation curve.
+#' @param control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list Optional list of subject-level precomputations, with
+#'   one element per subject. If `NULL`, the precomputations are constructed
+#'   internally by `grad_eta_fast()`.
 #'
-#' @return numeric vector of length K (negative gradient)
-#' @export
+#' @return Numeric vector of length `K` containing the gradient of the
+#'   negative total weighted log-likelihood with respect to \eqn{\eta}.
 grad_negloglik_eta <- function(beta,
                                eta,
                                data,
@@ -514,21 +453,27 @@ grad_negloglik_eta <- function(beta,
 }
 
 
-#' Gradient of the negative log-likelihood w.r.t. eta
+#' Compute the eta gradient for optimization
 #'
-#' Computes the gradient of the **negative** total log-likelihood
-#' with respect to the visit-age parameter vector \eqn{\eta},
-#' holding \eqn{\beta} fixed.
+#' Evaluates the gradient of the negative total weighted log-likelihood with
+#' respect to the healthcare-visit spline coefficients. This optimizer-facing
+#' wrapper delegates the calculation to `grad_negloglik_eta()`.
 #'
-#' @param eta Numeric vector of length K.
-#' @param beta Numeric vector of length J (held fixed).
-#' @param data rsv_data
-#' @param model rsv_model
-#' @param rsv_control rsv_control object
-#' @param subj_pre_list list of subject-level precomputations
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients, held fixed in this gradient.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases and
+#'   seasonal RSV circulation curve.
+#' @param rsv_control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization. The argument name avoids conflict with the
+#'   `control` argument used by `optim()`.
+#' @param subj_pre_list List of subject-level precomputations, with one element
+#'   per subject.
 #'
-#' @return numeric vector of length K
-#' @export
+#' @return Numeric vector of length `K` containing the gradient of the
+#'   negative total weighted log-likelihood with respect to \eqn{\eta}.
 obj_grad_negloglik_eta <- function(eta,
                                    beta,
                                    data,
@@ -550,65 +495,69 @@ obj_grad_negloglik_eta <- function(eta,
 }
 
 
-#' Gradient of quadratic penalty: alpha * M theta
+# Penalty gradients --------------------------------------------------------
+
+
+#' Compute the quadratic penalty gradient
 #'
-#' @param theta Numeric parameter vector.
-#' @param M Symmetric penalty matrix (typically t(D) %*% D).
-#' @param alpha Nonnegative smoothing parameter.
+#' Computes the gradient of the quadratic smoothing penalty with respect to a
+#' coefficient vector.
 #'
-#' @return Numeric vector of same length as theta.
-#' @export
+#' @param theta Numeric vector of length `p` containing the coefficients at
+#'   which the penalty gradient is evaluated.
+#' @param M Numeric `p x p` penalty matrix, typically constructed as
+#'   \eqn{D^\top D} from a second-difference matrix.
+#' @param alpha Nonnegative numeric scalar giving the smoothing parameter.
+#'
+#' @return Numeric vector of length `p` containing
+#'   \eqn{\alpha M\theta}. If `alpha` is zero, returns a zero vector.
 penalty_grad <- function(theta, M, alpha) {
-  # Fast exit
+  # Return the zero gradient when the penalty is inactive.
   if (alpha == 0) {
     return(rep(0.0, length(theta)))
   }
   
-  # Minimal checks
   stopifnot(is.numeric(theta), is.numeric(alpha), alpha >= 0)
   stopifnot(is.matrix(M), ncol(M) == length(theta), nrow(M) == length(theta))
   
-  # Compute alpha * M theta
   grad <- alpha * as.vector(M %*% theta)
   
   grad
 }
 
 
-#' Gradient of the penalized negative log-likelihood w.r.t. beta
+#' Compute the penalized gradient for beta optimization
 #'
-#' Computes the gradient of the **penalized negative log-likelihood**
-#' with respect to the infection-age parameter vector \eqn{\beta},
-#' holding \eqn{\eta} fixed.
+#' Computes the gradient of the penalized negative log-likelihood with respect
+#' to the infection-age spline coefficients, holding the healthcare-visit
+#' coefficients fixed.
+#'
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients, held fixed during optimization.
+#' @param alpha_beta Nonnegative numeric scalar controlling the smoothing
+#'   penalty for \eqn{\beta}.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the penalty matrix `M_beta`
+#'   and the components used in likelihood evaluation.
+#' @param rsv_control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list List of subject-level precomputations, with one element
+#'   per subject.
+#'
+#' @return Numeric vector of length `J` containing the gradient of the
+#'   penalized negative log-likelihood with respect to \eqn{\beta}.
 #'
 #' @details
-#' The gradient corresponds to
+#' The gradient is
 #' \deqn{
-#'   \nabla_\beta \tilde L(\beta)
-#'   =
 #'   -\nabla_\beta \ell(\beta,\eta)
 #'   +
 #'   \alpha_\beta M_\beta \beta,
 #' }
-#' where \eqn{M_\beta} is the second-difference penalty matrix stored
-#' in \code{model$M_beta}.
-#'
-#' @param beta Numeric vector of length \eqn{J}.
-#' @param eta Numeric vector of length \eqn{K} (held fixed).
-#' @param alpha_beta Nonnegative scalar smoothing parameter.
-#' @param data rsv_data
-#' @param model rsv_model containing \code{M_beta}
-#' @param rsv_control rsv_control object
-#' @param subj_pre_list list of subject-level precomputations
-#'
-#' @return Numeric vector of length \eqn{J}.
-#'
-#' @seealso
-#'   \code{\link{obj_pen_negloglik_beta}},
-#'   \code{\link{grad_negloglik_beta}},
-#'   \code{\link{penalty_grad}}
-#'
-#' @export
+#' where \eqn{M_\beta} is the quadratic smoothing-penalty matrix stored in
+#' `model$M_beta`.
 obj_grad_pen_negloglik_beta <- function(beta,
                                         eta,
                                         alpha_beta,
@@ -620,7 +569,6 @@ obj_grad_pen_negloglik_beta <- function(beta,
   stopifnot(is.numeric(alpha_beta), length(alpha_beta) == 1L, alpha_beta >= 0)
   stopifnot(!is.null(model$M_beta))
   
-  # Gradient of negative log-likelihood
   g_nll <- obj_grad_negloglik_beta(
     beta          = beta,
     eta           = eta,
@@ -630,7 +578,6 @@ obj_grad_pen_negloglik_beta <- function(beta,
     subj_pre_list = subj_pre_list
   )
   
-  # Gradient of penalty
   g_pen <- penalty_grad(
     theta = beta,
     M     = model$M_beta,
@@ -641,50 +588,38 @@ obj_grad_pen_negloglik_beta <- function(beta,
 }
 
 
-#' Gradient of the penalized negative log-likelihood w.r.t. eta
+#' Compute the penalized gradient for eta optimization
 #'
-#' Computes the gradient of the **penalized negative log-likelihood**
-#' with respect to the visit-age parameter vector \eqn{\eta},
-#' holding \eqn{\beta} fixed.
+#' Computes the gradient of the penalized negative log-likelihood with respect
+#' to the healthcare-visit spline coefficients, holding the infection-age
+#' coefficients fixed.
+#'
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients, held fixed during optimization.
+#' @param alpha_eta Nonnegative numeric scalar controlling the smoothing
+#'   penalty for \eqn{\eta}.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the penalty matrix `M_eta`
+#'   and the components used in likelihood evaluation.
+#' @param rsv_control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list List of subject-level precomputations, with one element
+#'   per subject.
+#'
+#' @return Numeric vector of length `K` containing the gradient of the
+#'   penalized negative log-likelihood with respect to \eqn{\eta}.
 #'
 #' @details
-#' The gradient corresponds to
+#' The gradient is
 #' \deqn{
-#'   \nabla_\eta \tilde L(\eta)
-#'   =
 #'   -\nabla_\eta \ell(\beta,\eta)
 #'   +
 #'   \alpha_\eta M_\eta \eta,
 #' }
-#' where:
-#' \itemize{
-#'   \item \eqn{\ell(\beta,\eta)} is the total weighted log-likelihood;
-#'   \item \eqn{M_\eta} is the second-difference penalty matrix stored
-#'         in \code{model$M_eta};
-#'   \item \eqn{\alpha_\eta \ge 0} is the smoothing parameter.
-#' }
-#'
-#' The likelihood gradient component is computed using
-#' \code{\link{grad_negloglik_eta}}, ensuring full consistency with
-#' the penalized objective.
-#'
-#' @param eta Numeric vector of length \eqn{K}.
-#' @param beta Numeric vector of length \eqn{J} (held fixed).
-#' @param alpha_eta Nonnegative scalar smoothing parameter.
-#' @param data rsv_data
-#' @param model rsv_model
-#' @param rsv_control rsv_control object
-#' @param subj_pre_list list of subject-level precomputations
-#'
-#' @return Numeric vector of length \eqn{K} giving the gradient of the
-#'   penalized negative log-likelihood.
-#'
-#' @seealso
-#'   \code{\link{obj_pen_negloglik_eta}},
-#'   \code{\link{grad_negloglik_eta}},
-#'   \code{\link{penalty_grad}}
-#'
-#' @export
+#' where \eqn{M_\eta} is the quadratic smoothing-penalty matrix stored in
+#' `model$M_eta`.
 obj_grad_pen_negloglik_eta <- function(eta,
                                        beta,
                                        alpha_eta,
@@ -696,7 +631,6 @@ obj_grad_pen_negloglik_eta <- function(eta,
   stopifnot(is.numeric(alpha_eta), length(alpha_eta) == 1L, alpha_eta >= 0)
   stopifnot(!is.null(model$M_eta))
   
-  # Gradient of negative log-likelihood
   g_nll <- obj_grad_negloglik_eta(
     eta           = eta,
     beta          = beta,
@@ -706,7 +640,6 @@ obj_grad_pen_negloglik_eta <- function(eta,
     subj_pre_list = subj_pre_list
   )
   
-  # Gradient of penalty
   g_pen <- penalty_grad(
     theta = eta,
     M     = model$M_eta,
@@ -717,38 +650,67 @@ obj_grad_pen_negloglik_eta <- function(eta,
 }
 
 
-#' Estimate eta via penalized maximum likelihood
+# Blockwise estimation -----------------------------------------------------
+
+
+#' Estimate the healthcare-visit coefficients
 #'
-#' Optimizes the (possibly penalized) negative log-likelihood with respect
-#' to the visit-age parameter vector eta, holding beta fixed.
+#' Estimates the healthcare-visit spline coefficients by minimizing the
+#' penalized negative log-likelihood while holding the infection-age
+#' coefficients fixed. Optimization uses the analytic gradient with L-BFGS-B
+#' and constrains the healthcare-visit coefficients to be nonnegative.
 #'
-#' Always uses the analytic gradient and L-BFGS-B with nonnegativity
-#' constraints (eta >= 0). The unpenalized case corresponds to
-#' alpha_eta = 0.
+#' @param eta_init Numeric vector of length `K` containing the initial
+#'   healthcare-visit spline coefficients. Values should be nonnegative.
+#' @param beta Numeric vector of length `J` containing the infection-age
+#'   spline coefficients, held fixed during optimization.
+#' @param alpha_eta Nonnegative numeric scalar controlling the smoothing
+#'   penalty for \eqn{\eta}.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the healthcare-visit basis,
+#'   penalty matrix `M_eta`, and components used in likelihood evaluation.
+#' @param rsv_control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list List of subject-level precomputations, with one element
+#'   per subject.
+#' @param maxit Positive integer scalar giving the maximum number of L-BFGS-B
+#'   iterations.
+#' @param trace Nonnegative integer scalar giving the trace level passed to
+#'   `optim()`. A value of zero suppresses optimizer tracing.
+#' @param compute_nll Logical scalar indicating whether to evaluate the
+#'   unpenalized negative log-likelihood at the estimated coefficients.
+#' @param fail_nonconvergence Logical scalar indicating whether to stop when
+#'   `optim()` returns a nonzero convergence code.
 #'
-#' @param eta_init Numeric vector of length K. Initial value for eta.
-#' @param beta Numeric vector of length J. Infection-age parameters (fixed).
-#' @param alpha_eta Nonnegative scalar smoothing parameter.
-#' @param data rsv_data object.
-#' @param model rsv_model object (must contain M_eta).
-#' @param rsv_control rsv_control object for numerical safeguards.
-#' @param subj_pre_list List of subject-level precomputations.
-#' @param maxit Maximum number of L-BFGS-B iterations.
-#' @param trace Trace level passed to optim (0 = silent).
-#' @param compute_nll Logical; if TRUE compute unpenalized NLL at solution.
-#' @param fail_nonconvergence Logical; if TRUE stop() when convergence != 0.
+#' @return A named list containing:
+#' \describe{
+#'   \item{\code{eta_hat}}{Numeric vector of length `K` containing the
+#'     estimated healthcare-visit spline coefficients.}
+#'   \item{\code{nll_pen}}{Numeric scalar giving the penalized negative
+#'     log-likelihood at `eta_hat`.}
+#'   \item{\code{nll}}{Numeric scalar giving the unpenalized negative
+#'     log-likelihood at `eta_hat` when `compute_nll = TRUE`; otherwise
+#'     `NA_real_`.}
+#'   \item{\code{convergence}}{Integer scalar containing the `optim()`
+#'     convergence code.}
+#'   \item{\code{message}}{Termination message returned by `optim()`.}
+#'   \item{\code{counts}}{Named vector containing the `optim()` function and
+#'     gradient evaluation counts.}
+#' }
 #'
-#' @return A list with components:
-#'   \itemize{
-#'     \item eta_hat: Estimated parameter vector.
-#'     \item nll_pen: Penalized negative log-likelihood at solution.
-#'     \item nll: Unpenalized negative log-likelihood (optional).
-#'     \item convergence: Optim convergence code.
-#'     \item message: Optim termination message.
-#'     \item counts: Function/gradient evaluation counts.
-#'   }
+#' @details
+#' With \eqn{\beta} fixed, the function minimizes
+#' \deqn{
+#'   \mathrm{NLL}(\beta,\eta)
+#'   +
+#'   \frac{\alpha_\eta}{2}
+#'   \eta^\top M_\eta \eta
+#' }
+#' subject to \eqn{\eta \ge 0}. Setting `alpha_eta = 0` gives the unpenalized
+#' blockwise estimate.
 #'
-#' @export
+#' If `fail_nonconvergence = FALSE`, a nonzero optimizer convergence code does
+#' not stop execution and is instead returned with the optimizer message.
 estimate_eta <- function(eta_init,
                          beta,
                          alpha_eta = 0,
@@ -761,7 +723,6 @@ estimate_eta <- function(eta_init,
                          compute_nll = FALSE,
                          fail_nonconvergence = FALSE) {
   
-  # --- basic checks ---
   stopifnot(is.numeric(eta_init), all(is.finite(eta_init)))
   stopifnot(is.numeric(beta), all(is.finite(beta)))
   stopifnot(is.numeric(alpha_eta), length(alpha_eta) == 1L, alpha_eta >= 0)
@@ -770,11 +731,11 @@ estimate_eta <- function(eta_init,
   
   K <- length(eta_init)
   
-  # --- bounds: eta >= 0 ---
+  # Enforce nonnegativity of the healthcare-visit coefficients.
   lower <- rep(0, K)
   upper <- rep(Inf, K)
   
-  # --- optimization ---
+  # Optimize eta with beta fixed using the analytic penalized gradient.
   fit <- optim(
     par    = eta_init,
     fn     = obj_pen_negloglik_eta,
@@ -791,7 +752,7 @@ estimate_eta <- function(eta_init,
     control = list(trace = trace, maxit = maxit)
   )
   
-  # --- optional strict failure ---
+  # Optionally treat optimizer nonconvergence as an error.
   if (isTRUE(fail_nonconvergence) && fit$convergence != 0) {
     stop(
       sprintf(
@@ -803,7 +764,7 @@ estimate_eta <- function(eta_init,
     )
   }
   
-  # --- optional unpenalized NLL at solution ---
+  # Optionally evaluate the unpenalized NLL for diagnostics.
   value_nll <- NA_real_
   if (isTRUE(compute_nll)) {
     value_nll <- obj_negloglik_eta(
@@ -816,7 +777,6 @@ estimate_eta <- function(eta_init,
     )
   }
   
-  # --- return structured result ---
   list(
     eta_hat     = fit$par,
     nll_pen     = fit$value,
@@ -828,38 +788,64 @@ estimate_eta <- function(eta_init,
 }
 
 
-#' Estimate beta via penalized maximum likelihood
+#' Estimate the infection-age coefficients
 #'
-#' Optimizes the (possibly penalized) negative log-likelihood with respect
-#' to the infection-age parameter vector beta, holding eta fixed.
+#' Estimates the infection-age spline coefficients by minimizing the
+#' penalized negative log-likelihood while holding the healthcare-visit
+#' coefficients fixed. Optimization uses the analytic gradient with L-BFGS-B
+#' and constrains the infection-age coefficients to be nonnegative.
 #'
-#' Always uses the analytic gradient and L-BFGS-B with nonnegativity
-#' constraints (beta >= 0). The unpenalized case corresponds to
-#' alpha_beta = 0.
+#' @param beta_init Numeric vector of length `J` containing the initial
+#'   infection-age spline coefficients. Values should be nonnegative.
+#' @param eta Numeric vector of length `K` containing the healthcare-visit
+#'   spline coefficients, held fixed during optimization.
+#' @param alpha_beta Nonnegative numeric scalar controlling the smoothing
+#'   penalty for \eqn{\beta}.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the infection-age basis,
+#'   penalty matrix `M_beta`, and components used in likelihood evaluation.
+#' @param rsv_control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list List of subject-level precomputations, with one element
+#'   per subject.
+#' @param maxit Positive integer scalar giving the maximum number of L-BFGS-B
+#'   iterations.
+#' @param trace Nonnegative integer scalar giving the trace level passed to
+#'   `optim()`. A value of zero suppresses optimizer tracing.
+#' @param compute_nll Logical scalar indicating whether to evaluate the
+#'   unpenalized negative log-likelihood at the estimated coefficients.
+#' @param fail_nonconvergence Logical scalar indicating whether to stop when
+#'   `optim()` returns a nonzero convergence code.
 #'
-#' @param beta_init Numeric vector of length J. Initial value for beta.
-#' @param eta Numeric vector of length K. Visit-age parameters (fixed).
-#' @param alpha_beta Nonnegative scalar smoothing parameter.
-#' @param data rsv_data object.
-#' @param model rsv_model object (must contain M_beta).
-#' @param rsv_control rsv_control object for numerical safeguards.
-#' @param subj_pre_list List of subject-level precomputations.
-#' @param maxit Maximum number of L-BFGS-B iterations.
-#' @param trace Trace level passed to optim (0 = silent).
-#' @param compute_nll Logical; if TRUE compute unpenalized NLL at solution.
-#' @param fail_nonconvergence Logical; if TRUE stop() when convergence != 0.
+#' @return A named list containing:
+#' \describe{
+#'   \item{\code{beta_hat}}{Numeric vector of length `J` containing the
+#'     estimated infection-age spline coefficients.}
+#'   \item{\code{nll_pen}}{Numeric scalar giving the penalized negative
+#'     log-likelihood at `beta_hat`.}
+#'   \item{\code{nll}}{Numeric scalar giving the unpenalized negative
+#'     log-likelihood at `beta_hat` when `compute_nll = TRUE`; otherwise
+#'     `NA_real_`.}
+#'   \item{\code{convergence}}{Integer scalar containing the `optim()`
+#'     convergence code.}
+#'   \item{\code{message}}{Termination message returned by `optim()`.}
+#'   \item{\code{counts}}{Named vector containing the `optim()` function and
+#'     gradient evaluation counts.}
+#' }
 #'
-#' @return A list with components:
-#'   \itemize{
-#'     \item beta_hat: Estimated parameter vector.
-#'     \item nll_pen: Penalized negative log-likelihood at solution.
-#'     \item nll: Unpenalized negative log-likelihood (optional).
-#'     \item convergence: Optim convergence code.
-#'     \item message: Optim termination message.
-#'     \item counts: Function/gradient evaluation counts.
-#'   }
+#' @details
+#' With \eqn{\eta} fixed, the function minimizes
+#' \deqn{
+#'   \mathrm{NLL}(\beta,\eta)
+#'   +
+#'   \frac{\alpha_\beta}{2}
+#'   \beta^\top M_\beta \beta
+#' }
+#' subject to \eqn{\beta \ge 0}. Setting `alpha_beta = 0` gives the
+#' unpenalized blockwise estimate.
 #'
-#' @export
+#' If `fail_nonconvergence = FALSE`, a nonzero optimizer convergence code does
+#' not stop execution and is instead returned with the optimizer message.
 estimate_beta <- function(beta_init,
                           eta,
                           alpha_beta = 0,
@@ -872,7 +858,6 @@ estimate_beta <- function(beta_init,
                           compute_nll = FALSE,
                           fail_nonconvergence = FALSE) {
   
-  # --- basic checks ---
   stopifnot(is.numeric(beta_init), all(is.finite(beta_init)))
   stopifnot(is.numeric(eta), all(is.finite(eta)))
   stopifnot(is.numeric(alpha_beta), length(alpha_beta) == 1L, alpha_beta >= 0)
@@ -881,11 +866,11 @@ estimate_beta <- function(beta_init,
   
   J <- length(beta_init)
   
-  # --- bounds: beta >= 0 ---
+  # Enforce nonnegativity of the infection-age coefficients.
   lower <- rep(0, J)
   upper <- rep(Inf, J)
   
-  # --- optimization ---
+  # Optimize beta with eta fixed using the analytic penalized gradient.
   fit <- optim(
     par    = beta_init,
     fn     = obj_pen_negloglik_beta,
@@ -902,7 +887,7 @@ estimate_beta <- function(beta_init,
     control = list(trace = trace, maxit = maxit)
   )
   
-  # --- optional strict failure ---
+  # Optionally treat optimizer nonconvergence as an error.
   if (isTRUE(fail_nonconvergence) && fit$convergence != 0) {
     stop(
       sprintf(
@@ -914,7 +899,7 @@ estimate_beta <- function(beta_init,
     )
   }
   
-  # --- optional unpenalized NLL at solution ---
+  # Optionally evaluate the unpenalized NLL for diagnostics.
   value_nll <- NA_real_
   if (isTRUE(compute_nll)) {
     value_nll <- obj_negloglik_beta(
@@ -927,7 +912,6 @@ estimate_beta <- function(beta_init,
     )
   }
   
-  # --- return structured result ---
   list(
     beta_hat    = fit$par,
     nll_pen     = fit$value,
@@ -939,116 +923,95 @@ estimate_beta <- function(beta_init,
 }
 
 
-#' Alternating estimation of beta and eta via block coordinate descent
+# Alternating estimation --------------------------------------------------
+
+
+#' Estimate infection-age and healthcare-visit curves
 #'
-#' Fits the joint penalized model for the infection-age spline
-#' coefficients \eqn{\beta} and the covariate spline coefficients
-#' \eqn{\eta} using alternating (block coordinate descent) optimization.
+#' Estimates the infection-age and healthcare-visit spline coefficients by
+#' alternating between two constrained blockwise optimization steps. Each
+#' update minimizes the joint penalized objective with the other coefficient
+#' vector held fixed.
 #'
-#' At each outer iteration:
-#' \enumerate{
-#'   \item Update \eqn{\beta} by minimizing the penalized objective
-#'         with \eqn{\eta} held fixed.
-#'   \item Update \eqn{\eta} by minimizing the penalized objective
-#'         with \eqn{\beta} held fixed.
+#' @param beta_init Numeric vector of length `J` containing the initial
+#'   infection-age spline coefficients. Values should be nonnegative.
+#' @param eta_init Numeric vector of length `K` containing the initial
+#'   healthcare-visit spline coefficients. Values should be nonnegative.
+#' @param alpha Nonnegative numeric scalar controlling the common smoothing
+#'   penalty applied to \eqn{\beta} and \eqn{\eta}.
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases,
+#'   seasonal RSV circulation curve, and penalty matrices `M_beta` and
+#'   `M_eta`.
+#' @param rsv_control An `rsv_control` object controlling numerical checks,
+#'   clipping, and stabilization.
+#' @param subj_pre_list List of subject-level precomputations, with one element
+#'   per subject.
+#' @param max_outer Positive integer scalar giving the maximum number of
+#'   alternating optimization iterations.
+#' @param convergence Character scalar specifying the outer convergence
+#'   criterion. Supported values are `"objective"`, `"l2"`, and `"both"`.
+#' @param tol_obj Nonnegative numeric scalar giving the relative tolerance for
+#'   objective-based convergence.
+#' @param tol_l2 Nonnegative numeric scalar giving the relative tolerance for
+#'   coefficient-based convergence.
+#' @param verbose Logical scalar indicating whether to print iteration-level
+#'   convergence diagnostics.
+#'
+#' @return A named list containing:
+#' \describe{
+#'   \item{\code{beta_hat}}{Numeric vector of length `J` containing the
+#'     estimated infection-age spline coefficients.}
+#'   \item{\code{eta_hat}}{Numeric vector of length `K` containing the
+#'     estimated healthcare-visit spline coefficients.}
+#'   \item{\code{converged}}{Logical scalar indicating whether the selected
+#'     outer convergence criterion was satisfied.}
+#'   \item{\code{n_outer}}{Integer scalar giving the number of outer
+#'     iterations performed.}
+#'   \item{\code{inner_conv_beta}}{Logical vector of length `n_outer`
+#'     indicating whether each beta-update optimization converged.}
+#'   \item{\code{inner_conv_eta}}{Logical vector of length `n_outer`
+#'     indicating whether each eta-update optimization converged.}
+#'   \item{\code{inner_failed}}{Logical scalar indicating whether any
+#'     blockwise optimization reported nonconvergence.}
+#'   \item{\code{rel_change_beta}}{Numeric scalar giving the final relative
+#'     L2 change in the infection-age coefficients.}
+#'   \item{\code{rel_change_eta}}{Numeric scalar giving the final relative
+#'     L2 change in the healthcare-visit coefficients.}
+#'   \item{\code{rel_change_obj}}{Numeric scalar giving the final relative
+#'     change in the joint penalized objective.}
+#'   \item{\code{final_objective}}{Numeric scalar giving the joint penalized
+#'     objective at the final retained coefficient estimates.}
 #' }
 #'
-#' The joint penalized objective minimized is
+#' @details
+#' Each outer iteration first updates \eqn{\beta} with \eqn{\eta} fixed, then
+#' updates \eqn{\eta} using the new value of \eqn{\beta}. Both blockwise
+#' optimizations enforce nonnegative spline coefficients.
+#'
+#' The joint objective is
 #' \deqn{
-#'   F(\beta, \eta)
+#'   F(\beta,\eta)
 #'   =
-#'   \mathrm{NLL}(\beta, \eta)
+#'   \mathrm{NLL}(\beta,\eta)
 #'   +
 #'   \frac{\alpha}{2}
 #'   \left(
 #'     \beta^\top M_\beta \beta
 #'     +
 #'     \eta^\top M_\eta \eta
-#'   \right),
+#'   \right).
 #' }
-#' where \eqn{\mathrm{NLL}(\beta, \eta)} is the unpenalized negative
-#' log-likelihood returned by \code{\link{rsv_negloglik}}.
 #'
-#' Convergence may be assessed using relative parameter change
-#' (L2 norm), relative objective change, or both.
+#' With `convergence = "objective"`, the routine stops when the relative
+#' objective change is below `tol_obj`. With `"l2"`, both coefficient vectors
+#' must have relative L2 changes below `tol_l2`. With `"both"`, both conditions
+#' must be satisfied.
 #'
-#' @param beta_init Numeric vector giving the initial values for
-#'   the spline coefficients \eqn{\beta}.
-#'
-#' @param eta_init Numeric vector giving the initial values for
-#'   the spline coefficients \eqn{\eta}.
-#'
-#' @param alpha Non-negative scalar smoothing parameter controlling
-#'   the strength of penalization for both \eqn{\beta} and \eqn{\eta}.
-#'
-#' @param data Data object passed to \code{\link{rsv_negloglik}} and
-#'   the blockwise estimation routines.
-#'
-#' @param model Model object containing spline basis matrices and
-#'   penalty matrices \code{M_beta} and \code{M_eta}.
-#'
-#' @param rsv_control Control object passed to the likelihood and
-#'   estimation routines.
-#'
-#' @param subj_pre_list Precomputed subject-level quantities used to
-#'   accelerate likelihood evaluation.
-#'
-#' @param max_outer Maximum number of outer (alternating) iterations.
-#'
-#' @param convergence Character string specifying the convergence
-#'   criterion. One of:
-#'   \describe{
-#'     \item{\code{"objective"}}{Stop when the relative change in the
-#'       penalized objective is below \code{tol_obj}.}
-#'     \item{\code{"l2"}}{Stop when the relative L2 change in both
-#'       \eqn{\beta} and \eqn{\eta} is below \code{tol_l2}.}
-#'     \item{\code{"both"}}{Require both objective and L2 criteria.}
-#'   }
-#'
-#' @param tol_obj Relative tolerance for objective-based convergence.
-#'
-#' @param tol_l2 Relative tolerance for L2-based convergence.
-#'
-#' @param verbose Logical; if \code{TRUE}, prints iteration-level
-#'   diagnostics.
-#'
-#' @return A list with components:
-#'   \describe{
-#'     \item{\code{beta_hat}}{Estimated spline coefficients \eqn{\beta}.}
-#'     \item{\code{eta_hat}}{Estimated spline coefficients \eqn{\eta}.}
-#'     \item{\code{converged}}{Logical indicating whether convergence
-#'       criteria were satisfied.}
-#'     \item{\code{n_outer}}{Number of outer iterations performed.}
-#'     \item{\code{inner_conv_beta}}{Logical vector indicating whether
-#'       each beta-update optimization converged.}
-#'     \item{\code{inner_conv_eta}}{Logical vector indicating whether
-#'       each eta-update optimization converged.}
-#'     \item{\code{inner_failed}}{Logical; \code{TRUE} if any inner
-#'       optimization reported non-convergence.}
-#'     \item{\code{rel_change_beta}}{Final relative L2 change in
-#'       \eqn{\beta}.}
-#'     \item{\code{rel_change_eta}}{Final relative L2 change in
-#'       \eqn{\eta}.}
-#'     \item{\code{rel_change_obj}}{Final relative change in the
-#'       penalized objective.}
-#'     \item{\code{final_objective}}{Value of the penalized objective
-#'       at the final parameter estimates.}
-#'   }
-#'
-#' @details
-#' The algorithm implements block coordinate descent and is
-#' typically monotone in the penalized objective, though small
-#' numerical increases may occur due to optimizer tolerances.
-#'
-#' If a non-finite objective value is encountered, the routine
-#' terminates early and returns the current parameter values with
-#' \code{converged = FALSE}.
-#'
-#' @seealso \code{\link{estimate_beta}},
-#'   \code{\link{estimate_eta}},
-#'   \code{\link{full_penalized_objective}}
-#'
-#' @export
+#' Inner optimizer convergence is recorded separately from the outer stopping
+#' criterion. If a non-finite objective is encountered, alternating estimation
+#' stops early and returns the current retained estimates with
+#' `converged = FALSE`.
 estimate_model_alternating <- function(
     beta_init,
     eta_init,
@@ -1069,12 +1032,13 @@ estimate_model_alternating <- function(
   stopifnot(is.numeric(eta_init))
   stopifnot(is.list(subj_pre_list))
   
+  # Protect relative-change calculations when a baseline is near zero.
   eps <- 1e-12
   
   beta_curr <- beta_init
   eta_curr  <- eta_init
   
-  # Compute initial objective
+  # Evaluate the joint objective before alternating updates.
   obj_old <- full_penalized_objective(
     beta_curr, eta_curr, alpha,
     data, model, rsv_control, subj_pre_list
@@ -1111,7 +1075,7 @@ estimate_model_alternating <- function(
       message(sprintf("Outer iteration %d", iter))
     }
     
-    ## ---- β-step ----
+    # Update beta with eta fixed.
     fit_beta <- estimate_beta(
       beta_init     = beta_curr,
       eta           = eta_curr,
@@ -1125,7 +1089,7 @@ estimate_model_alternating <- function(
     beta_new <- fit_beta$beta_hat
     inner_conv_beta[iter] <- (fit_beta$convergence == 0)
     
-    ## ---- η-step ----
+    # Update eta using the new beta estimate (fixed).
     fit_eta <- estimate_eta(
       eta_init      = eta_curr,
       beta          = beta_new,
@@ -1139,7 +1103,7 @@ estimate_model_alternating <- function(
     eta_new <- fit_eta$eta_hat
     inner_conv_eta[iter] <- (fit_eta$convergence == 0)
     
-    ## ---- Compute full objective ----
+    # Evaluate the joint objective after both block updates.
     obj_new <- full_penalized_objective(
       beta_new, eta_new, alpha,
       data, model, rsv_control, subj_pre_list
@@ -1153,7 +1117,7 @@ estimate_model_alternating <- function(
       break
     }
     
-    ## ---- Relative L2 changes ----
+    # Compute relative L2 changes using protected baseline norms.
     denom_beta <- sqrt(sum(beta_curr^2))
     if (denom_beta < eps) denom_beta <- 1
     
@@ -1163,7 +1127,7 @@ estimate_model_alternating <- function(
     rel_change_beta <- sqrt(sum((beta_new - beta_curr)^2)) / denom_beta
     rel_change_eta  <- sqrt(sum((eta_new  - eta_curr)^2))  / denom_eta
     
-    ## ---- Relative objective change ----
+    # Compute the relative objective change using a protected baseline.
     denom_obj <- abs(obj_old)
     if (denom_obj < eps) denom_obj <- 1
     
@@ -1176,12 +1140,11 @@ estimate_model_alternating <- function(
       ))
     }
     
-    ## ---- Update current values ----
     beta_curr <- beta_new
     eta_curr  <- eta_new
     obj_old   <- obj_new
     
-    ## ---- Check convergence ----
+    # Apply the selected outer convergence criterion.
     stop_l2  <- (rel_change_beta < tol_l2 && rel_change_eta < tol_l2)
     stop_obj <- (rel_change_obj  < tol_obj)
     
@@ -1203,7 +1166,7 @@ estimate_model_alternating <- function(
     }
   }
   
-  ## Trim diagnostic vectors
+  # Retain diagnostics only for completed outer iterations.
   inner_conv_beta <- inner_conv_beta[seq_len(n_outer)]
   inner_conv_eta  <- inner_conv_eta[seq_len(n_outer)]
   
@@ -1225,60 +1188,61 @@ estimate_model_alternating <- function(
 }
 
 
+# Initialization -----------------------------------------------------------
+
+
 #' Create perturbed initial coefficient values
 #'
-#' Generates reproducible starting values for alternating optimization by
-#' applying independent multiplicative log-normal perturbations to two
-#' nonnegative coefficient vectors. The perturbed vectors are rescaled to
-#' preserve approximately the same mean coefficient level as the originals.
+#' Creates starting values for alternating estimation by applying independent
+#' multiplicative perturbations to the infection-age and healthcare-visit
+#' spline coefficients. Each perturbed vector is rescaled to preserve the
+#' mean coefficient value of the corresponding input vector. When a seed is
+#' supplied, the perturbations are reproducible.
 #'
-#' This helper is intended for controlled simulation examples where the
-#' optimization should begin near known reference or true parameter values.
-#'
-#' @param beta A nonempty numeric vector of nonnegative coefficients for the
-#'   infection-age curve.
-#' @param eta A nonempty numeric vector of nonnegative coefficients for the
-#'   visit-age curve.
-#' @param noise_sd A single nonnegative numeric value giving the standard
-#'   deviation of the normal noise applied on the log scale. Defaults to
-#'   `0.05`.
-#' @param seed An optional numeric value used to initialize the random-number
-#'   generator. Defaults to `NULL`.
+#' @param beta Numeric vector of length `J` containing the nonnegative
+#'   infection-age spline coefficients to perturb.
+#' @param eta Numeric vector of length `K` containing the nonnegative
+#'   healthcare-visit spline coefficients to perturb.
+#' @param noise_sd Nonnegative numeric scalar giving the standard deviation of
+#'   the normal perturbations applied on the log scale.
+#' @param seed Optional integer scalar used to initialize the random-number
+#'   generator. If supplied, the function calls `set.seed()` and does not
+#'   restore the previous RNG state.
 #'
 #' @return A named list containing:
 #' \describe{
-#'   \item{beta_init}{The perturbed initial coefficients corresponding to
-#'     `beta`.}
-#'   \item{eta_init}{The perturbed initial coefficients corresponding to
-#'     `eta`.}
+#'   \item{\code{beta_init}}{Numeric vector of length `J` containing the
+#'     perturbed infection-age spline coefficients.}
+#'   \item{\code{eta_init}}{Numeric vector of length `K` containing the
+#'     perturbed healthcare-visit spline coefficients.}
 #' }
 #'
 #' @details
-#' For each coefficient vector \eqn{\theta}, the function constructs initial
-#' values proportional to
+#' For each coefficient vector \eqn{\theta}, the initial values are formed as
+#' \deqn{
+#'   \theta_j^{\mathrm{init}}
+#'   =
+#'   \theta_j \exp(\epsilon_j),
+#' }
+#' where the \eqn{\epsilon_j} are independent normal random variables with
+#' mean zero and standard deviation `noise_sd`.
 #'
-#' \deqn{\theta_j^{init} = \theta_j \exp(\epsilon_j),}
-#'
-#' where \eqn{\epsilon_j} are independent normal random variables with mean
-#' zero and standard deviation `noise_sd`. This multiplicative construction
-#' preserves nonnegativity and produces perturbations relative to the scale of
-#' each coefficient.
-#'
-#' Coefficients that are zero or numerically close to zero are bounded below
-#' before the perturbed vector is rescaled to match the original mean.
+#' Perturbed values below `1e-8` are first bounded at `1e-8`. The resulting
+#' vector is then rescaled so that its mean matches the mean of the original
+#' coefficient vector. This provides nonnegative starting values near the
+#' simulation coefficients without initializing the estimator at the exact
+#' values used to generate the data.
 #'
 #' @examples
 #' initial_values <- make_perturbed_initial_values(
 #'   beta = c(0.1, 0.2, 0.3),
 #'   eta = c(0.3, 0.2, 0.1),
 #'   noise_sd = 0.05,
-#'   seed = 123
+#'   seed = 12345
 #' )
 #'
 #' initial_values$beta_init
 #' initial_values$eta_init
-#'
-#' @keywords internal
 make_perturbed_initial_values <- function(
     beta,
     eta,
