@@ -121,7 +121,7 @@ Rscript example/run_example.R
 Alternatively, open the project in an R environment such as RStudio, confirm that the working directory is the repository root, and run:
 
 ```r
-source("run_example.R")
+source("example/run_example.R")
 ```
 
 The complete workflow takes approximately **7–8 minutes** for the reference configuration, although runtime depends on the computer and execution environment.
@@ -144,8 +144,8 @@ A successful run ends with a summary of the simulated data, the model's converge
 
 When `save_plots = TRUE`, the following recovery figures are written to the `outputs/` directory:
 
-* `infection_curve_recovery.png`
-* `visit_curve_recovery.png`
+* `infection_age_curve.png`
+* `visit_age_curve.png`
 
 ## Repository structure
 
@@ -190,7 +190,7 @@ When `save_plots = TRUE`, the following recovery figures are written to the `out
   Generates synthetic subjects and simulates healthcare-visit outcomes.
 
 * **`R/diagnostics.R`**
-  Produces validation checks, summaries, recovery metrics, and comparison plots.
+  Provides subject-level summaries, infection-probability calculations, and comparison plots for the simulation and recovery workflow.
 
 * **`inputs/`**
   Stores the fixed seasonal circulation and curve-scaling inputs used by the reference example.
