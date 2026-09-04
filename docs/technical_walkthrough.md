@@ -312,7 +312,7 @@ The repository modules follow the same sequence as the statistical workflow.
 
 * **`R/diagnostics.R`** provides helpers for summarizing outcomes, calculating probabilities, scaling reference curves, and creating recovery plots.
 
-* **`run_example.R`** coordinates the complete reference workflow. It loads the inputs, simulates the data, validates the subject-level distributions, estimates the model, calculates recovery metrics, reports convergence and runtime, and saves the comparison figures.
+* **`example/run_example.R`** coordinates the complete reference workflow. It loads the inputs, simulates the data, validates the subject-level distributions, estimates the model, calculates recovery metrics, reports convergence and runtime, and saves the comparison figures.
 
 ## Scope and technical limitations
 
