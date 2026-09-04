@@ -1,87 +1,85 @@
-#' Extract visit ages and summary columns from an rsv_data simulation
+# Diagnostics
+#
+# Provides summary, probability, and plotting helpers for the RSV simulation
+# and recovery workflow.
+
+
+#' Summarize healthcare-visit outcomes
 #'
-#' @description
-#' Converts an \code{rsv_data} object (a list of subject records) into a tidy,
-#' one-row-per-subject data frame suitable for quick summaries and plots.
+#' Converts an `rsv_data` object into a one-row-per-subject data frame
+#' containing birth-timing and healthcare-visit summaries. Optionally computes
+#' each subject's model-implied probability of a healthcare visit over the
+#' evaluation window.
 #'
-#' The returned table always includes:
-#' \itemize{
-#'   \item subject identifiers (\code{i}, \code{id})
-#'   \item birthday index (\code{birth_index}) plus calendar-style grouping columns
-#'         (\code{birth_month}, \code{birth_decile})
-#'   \item simulated visit outcome (\code{visit_age}) plus indicators
-#'         (\code{visit_in_window}, \code{I_visit})
-#'   \item visit-month-of-age (\code{visit_month}) for in-window visits
-#' }
+#' @param data An `rsv_data` object containing the subject records.
+#' @param model An `rsv_model` object containing the daily spline bases used
+#'   to define the age window and compute model-implied visit probabilities.
+#' @param visit_age_max Positive integer scalar or `NULL`. Upper bound for
+#'   healthcare-visit ages included in the evaluation window. If `NULL`, the
+#'   value of `days` is used.
+#' @param days Positive integer scalar giving the age-window length. It is used
+#'   as `visit_age_max` when that argument is `NULL` and as the evaluation
+#'   window when `compute_g = TRUE`. The default is `ncol(model$B_day)`.
+#' @param compute_g Logical scalar indicating whether to compute each subject's
+#'   model-implied healthcare-visit probability \eqn{g_i}. The default is
+#'   `FALSE`.
+#' @param beta Numeric vector of length J containing the infection-age spline
+#'   coefficients. Required when `compute_g = TRUE`.
+#' @param eta Numeric vector of length K containing the healthcare-visit spline
+#'   coefficients. Required when `compute_g = TRUE`.
+#' @param control An `rsv_control` object controlling numerical checks and
+#'   clipping when `compute_g = TRUE`.
+#' @param subj_pre_list List of subject-level precomputations or `NULL`.
+#'   Required when `compute_g = TRUE`, with one element per subject containing
+#'   `lambda_i` and `V_i`.
+#' @param month_len Positive numeric scalar giving the number of days used to
+#'   map day indices to month-like bins. The default is `365 / 12`.
+#' @param nbins Integer scalar at least 2 giving the number of quantile bins
+#'   used for `g_decile` when `compute_g = TRUE`. The default is 10.
 #'
-#' Optionally (\code{compute_g=TRUE}), it also computes the model-implied visit
-#' probability \eqn{g_i} using the same internal pipeline as
-#' \code{run_empirical_checks()}:
-#' \enumerate{
-#'   \item build \code{Fbar_i} from \code{beta} and precomputed \code{V_i},
-#'   \item build \code{pi} from \code{lambda_i} and the global \code{w} curve,
-#'   \item build \code{Q} from \code{Fbar} and \code{pi},
-#'   \item compute \code{U = S_day %*% Q} and then \code{g_i = eta^T U}.
-#' }
-#' When enabled, the table includes \code{g_i}, \code{I_minus_g},
-#' \code{abs_I_minus_g}, and \code{g_decile}.
-#'
-#' @param data An \code{"rsv_data"} object with a \code{data$subjects} list.
-#'   Each subject should include at least \code{birth_index} and \code{visit_age}.
-#' @param model An \code{"rsv_model"} object. Needed for \code{days} and
-#'   for computing \code{g_i} when \code{compute_g=TRUE}.
-#' @param visit_age_max Integer upper bound for “in-window” visit ages.
-#'   Defaults to \code{days}. Used to define \code{visit_in_window} and \code{I_visit}.
-#' @param days Integer age window length. Defaults to \code{ncol(model$B_day)}.
-#' @param compute_g Logical; if \code{TRUE}, compute per-subject \code{g_i}.
-#'   Default \code{FALSE}.
-#' @param beta Numeric vector of infection-age basis coefficients. Required if
-#'   \code{compute_g=TRUE}.
-#' @param eta Numeric vector of visit-age basis coefficients. Required if
-#'   \code{compute_g=TRUE}.
-#' @param control An \code{"rsv_control"} (or compatible list) passed to internal helpers
-#'   used to compute \code{g_i}.
-#' @param subj_pre_list Optional list of subject precomputations, one per subject,
-#'   each containing \code{lambda_i} and \code{V_i}. REQUIRED if \code{compute_g=TRUE}.
-#' @param month_len Numeric; length (in days) used to map day indices to a
-#'   month-like bin via \code{ceiling(day / month_len)}. Default is \code{365/12}.
-#' @param nbins Integer number of quantile bins for \code{g_decile} when
-#'   \code{compute_g=TRUE}. Default is \code{10L}.
-#'
-#' @return A data.frame with one row per subject. Always includes:
+#' @return A data frame with one row per subject containing:
 #' \describe{
-#'   \item{\code{i}}{Row index (1..n).}
-#'   \item{\code{id}}{Subject id (if present in the record; otherwise NA).}
-#'   \item{\code{birth_index}}{Subject birthday index used for calendar alignment.}
-#'   \item{\code{birth_month}}{Month-like bin derived from \code{birth_index}.}
-#'   \item{\code{birth_decile}}{Decile bin (1..10) of \code{birth_index}.}
-#'   \item{\code{visit_age}}{Simulated visit day-of-age (NA if no visit).}
-#'   \item{\code{visit_in_window}}{TRUE if \code{visit_age} is in \code{1..visit_age_max}.}
-#'   \item{\code{I_visit}}{0/1 indicator equal to \code{as.integer(visit_in_window)}.}
-#'   \item{\code{visit_month}}{Month-like bin of \code{visit_age} for in-window visits; NA otherwise.}
+#'   \item{\code{i}}{Integer row index.}
+#'   \item{\code{id}}{Numeric subject identifier, or `NA` if absent.}
+#'   \item{\code{birth_index}}{Integer one-based birth index.}
+#'   \item{\code{birth_month}}{Integer month-like bin derived from
+#'     `birth_index` and capped at 12.}
+#'   \item{\code{birth_decile}}{Integer quantile bin from 1 through 10 based
+#'     on `birth_index`.}
+#'   \item{\code{visit_age}}{Integer healthcare-visit age, or `NA` if no visit
+#'     is recorded.}
+#'   \item{\code{visit_in_window}}{Logical indicator for a recorded visit
+#'     between days 1 and `visit_age_max`.}
+#'   \item{\code{I_visit}}{Integer indicator equal to 1 for an in-window visit
+#'     and 0 otherwise.}
+#'   \item{\code{visit_month}}{Integer month-like bin for an in-window
+#'     `visit_age`, or `NA` otherwise.}
 #' }
-#' If \code{compute_g=TRUE}, also includes:
+#'
+#' If `compute_g = TRUE`, the data frame also contains:
 #' \describe{
-#'   \item{\code{g_i}}{Model-implied probability of a visit within the evaluation window.}
-#'   \item{\code{I_minus_g}}{Residual-like quantity \code{I_visit - g_i}.}
-#'   \item{\code{abs_I_minus_g}}{Absolute deviation \code{abs(I_visit - g_i)}.}
-#'   \item{\code{g_decile}}{Quantile bin (1..nbins) of \code{g_i}.}
+#'   \item{\code{g_i}}{Numeric model-implied healthcare-visit probability.}
+#'   \item{\code{I_minus_g}}{Numeric difference `I_visit - g_i`.}
+#'   \item{\code{abs_I_minus_g}}{Nonnegative numeric absolute difference
+#'     `abs(I_visit - g_i)`.}
+#'   \item{\code{g_decile}}{Integer quantile bin from 1 through `nbins` based
+#'     on `g_i`.}
 #' }
 #'
-#' @examples
-#' \dontrun{
-#' # After simulating a dataset:
-#' df <- extract_visit_ages(data_sim, model = sim$model, visit_age_max = 365)
+#' @details
+#' A visit is treated as in-window when `visit_age` is nonmissing and lies
+#' between 1 and `visit_age_max`, inclusive.
 #'
-#' # With model-implied probabilities (requires subject precomputes):
-#' subj_pre <- lapply(data_sim$subjects, rsv_precompute_subject, model = sim$model, control = make_rsv_control())
-#' df2 <- extract_visit_ages(
-#'   data_sim, model = sim$model, compute_g = TRUE,
-#'   beta = beta_true, eta = eta_true, subj_pre_list = subj_pre
-#' )
+#' When `compute_g = TRUE`, the model-implied healthcare-visit probability is
+#' \deqn{
+#'   g_i(\beta,\eta) = \eta^\top U_i(\beta),
 #' }
-#'
-#' @export
+#' where
+#' \deqn{
+#'   U_i(\beta) = \sum_{m=1}^{D} s(m)Q_i(m;\beta),
+#' }
+#' and \eqn{Q_i(m;\beta)} is the daily first-infection probability mass over
+#' the effective evaluation window of length \eqn{D}.
 extract_visit_ages <- function(data,
                                model,
                                visit_age_max = NULL,
@@ -105,13 +103,13 @@ extract_visit_ages <- function(data,
   visit_age_max <- as.integer(visit_age_max)
   stopifnot(visit_age_max >= 1L)
   
-  # Helper: month index from day index (age day or birth day)
+  # Map day indices to capped month-like bins.
   day_to_month <- function(day, month_len, max_month = 12L) {
     ifelse(is.na(day), NA_integer_,
            pmin(max_month, pmax(1L, as.integer(ceiling(day / month_len)))))
   }
   
-  # Helper: quantile bins (1..nbins). Robust to ties.
+  # Construct quantile bins while handling tied values.
   quantile_bins <- function(x, nbins = 10L) {
     nbins <- as.integer(nbins)
     stopifnot(nbins >= 2L)
@@ -123,7 +121,7 @@ extract_visit_ages <- function(data,
     qs <- stats::quantile(x[ok], probs = seq(0, 1, length.out = nbins + 1L),
                           na.rm = TRUE, type = 7)
     
-    # If breaks collapse (ties), fall back to rank-based binning
+    # Use rank-based bins when tied values collapse quantile breaks.
     if (any(diff(qs) <= 0)) {
       r <- rank(x[ok], ties.method = "average")
       out[ok] <- pmin(nbins, pmax(1L, ceiling(nbins * r / max(r))))
@@ -134,9 +132,7 @@ extract_visit_ages <- function(data,
     out
   }
   
-  # ------------------------------------------------------------
-  # Base extraction (always)
-  # ------------------------------------------------------------
+  # Extract the subject-level fields used in the summary.
   id <- vapply(data$subjects, function(s) if (!is.null(s$id)) s$id else NA_real_, numeric(1))
   birth_index <- vapply(data$subjects, function(s) as.integer(s$birth_index), integer(1))
   visit_age <- vapply(
@@ -163,9 +159,7 @@ extract_visit_ages <- function(data,
     stringsAsFactors = FALSE
   )
   
-  # ------------------------------------------------------------
-  # Optional: compute g_i (requires subj_pre_list + beta/eta)
-  # ------------------------------------------------------------
+  # Optionally compute model-implied healthcare-visit probabilities.
   compute_g <- isTRUE(compute_g)
   if (compute_g) {
     if (is.null(subj_pre_list)) {
@@ -174,12 +168,12 @@ extract_visit_ages <- function(data,
     stopifnot(is.list(subj_pre_list), length(subj_pre_list) == n)
     stopifnot(is.numeric(beta), is.numeric(eta))
     
-    # Global precompute for w_vec and c_vec
+    # Precompute coefficient-dependent curves once for all subjects.
     glob <- rsv_precompute_global(beta = beta, eta = eta, model = model, control = control)
     w_vec <- glob$w_vec
     c_vec <- glob$c_vec
     
-    # Defensive trim window supported by global objects
+    # Restrict the evaluation window to dimensions supported by all inputs.
     D_global <- min(days, length(w_vec), length(c_vec), ncol(model$S_day), ncol(model$B_day))
     days_eff <- as.integer(D_global)
     
@@ -227,26 +221,43 @@ extract_visit_ages <- function(data,
 }
 
 
-#' Probability of infection by a given age
+#' Compute first-infection probability by age
 #'
-#' Computes the analytical probability
-#'   P(R_i <= days) = 1 - exp{ - beta^T v_i(days) }
-#' for a single subject under the RSV infection-age model.
+#' Computes the model-implied probability that a subject experiences their
+#' first RSV infection by a specified age.
 #'
-#' @param beta Numeric vector length J.
-#' @param subj_pre Output of rsv_precompute_subject() for subject i.
-#' @param days Integer in 1:365 (default 365).
-#' @param control rsv_control object.
+#' @param beta Numeric vector of length J containing the infection-age spline
+#'   coefficients.
+#' @param subj_pre Named list of subject-level precomputations containing
+#'   `V_i`, a numeric J x 366 cumulative-kernel matrix.
+#' @param days Integer scalar in 1:365 giving the cumulative age endpoint.
+#'   The default is 365.
+#' @param control An `rsv_control` object controlling numerical bound checks
+#'   and clipping behavior.
 #'
-#' @return Numeric scalar in [0,1]: probability of infection by age `days`.
+#' @return Numeric scalar in [0, 1] giving the probability of first infection
+#'   by age `days`.
 #'
-#' @export
+#' @details
+#' For cumulative age endpoint \eqn{d}, the subject-specific cumulative hazard
+#' is
+#' \deqn{
+#'   H_i(d) = \beta^\top v_i(d).
+#' }
+#' The probability of first infection by age \eqn{d} is therefore
+#' \deqn{
+#'   P(R_i \le d)
+#'   =
+#'   1 - \exp\{-H_i(d)\}.
+#' }
+#' The returned probability is clipped to [0, 1] according to the numerical
+#' settings in `control`.
 prob_infected_by_age <- function(beta,
                                  subj_pre,
                                  days = 365L,
                                  control = make_rsv_control()) {
   
-  # ---- checks ----
+  # Validate the age endpoint and cumulative-kernel dimensions.
   if (!is.numeric(days) || length(days) != 1L ||
       days < 1L || days > 365L)
     stop("days must be an integer in 1:365.")
@@ -258,16 +269,15 @@ prob_infected_by_age <- function(beta,
   if (length(beta) != nrow(V_i))
     stop("Length of beta must match nrow(V_i).")
   
-  # ---- integrated hazard at 'days' ----
-  v_d <- V_i[, days + 1L]      # v_i(days)
+  # Compute the cumulative hazard and first-infection probability.
+  v_d <- V_i[, days + 1L]
   H_d <- sum(beta * v_d)
   
-  # ---- survival and probability ----
   Fbar_d <- exp(-H_d)
   
   prob <- 1 - Fbar_d
   
-  # numerical guard
+  # Enforce probability bounds using the configured numerical controls.
   .clip_to_range(
     prob,
     lower        = 0.0,
@@ -279,53 +289,39 @@ prob_infected_by_age <- function(beta,
 }
 
 
-# Scale factor s so that P_i(infected by D) = p_target for one subject i
-scale_w_for_infection_prob_subject <- function(p_target,
-                                               lambda_i,
-                                               w0,
-                                               D = 365L) {
-  stopifnot(is.numeric(p_target), length(p_target) == 1L,
-            is.finite(p_target), p_target > 0, p_target < 1)
-  stopifnot(is.numeric(lambda_i), length(lambda_i) >= D)
-  stopifnot(is.numeric(w0),       length(w0)       >= D)
-  
-  A <- sum(lambda_i[1:D] * w0[1:D])
-  if (!is.finite(A) || A <= 0) {
-    stop("A = sum(lambda_i * w0) must be positive and finite; check lambda_i/w0.")
-  }
-  
-  s <- -log1p(-p_target) / A  # stable version of -log(1 - p)
-  s
-}
-
-
-# Optimized, fully vectorized version
-scale_c_for_visit_prob_subject <- function(p_target,
-                                           lambda_i,
-                                           w,
-                                           c0,
-                                           D = 365L) {
-  stopifnot(length(lambda_i) >= D,
-            length(w) >= D,
-            length(c0) >= D,
-            is.numeric(p_target), length(p_target) == 1L,
-            is.finite(p_target), p_target > 0, p_target < 1)
-  
-  hazard <- lambda_i[1:D] * w[1:D]
-  cumhazard <- c(0, cumsum(hazard))[1:D]  # lagged version
-  Fbar <- exp(-cumhazard)
-  
-  pi <- hazard * Fbar
-  B <- sum(pi * c0[1:D])
-  
-  if (B <= 0 || !is.finite(B))
-    stop("B must be positive and finite. Check inputs.")
-  
-  s <- p_target / B
-  s
-}
-
-
+#' Plot infection-age and healthcare-visit curve recovery
+#'
+#' Compares the estimated infection-age and healthcare-visit curves with the
+#' known curves used to generate the simulated data. The plots are displayed
+#' during interactive use and can optionally be saved as PNG files.
+#'
+#' @param curve_results Data frame containing the curve values to compare. It
+#'   must include:
+#' \describe{
+#'   \item{\code{age_months}}{Numeric vector giving age in months.}
+#'   \item{\code{w_true}}{Numeric vector containing the known simulation
+#'     infection-age curve.}
+#'   \item{\code{w_estimated}}{Numeric vector containing the estimated
+#'     infection-age curve.}
+#'   \item{\code{c_true}}{Numeric vector containing the known simulation
+#'     healthcare-visit curve.}
+#'   \item{\code{c_estimated}}{Numeric vector containing the estimated
+#'     healthcare-visit curve.}
+#' }
+#' @param save_plots Logical scalar indicating whether to save the recovery
+#'   plots as PNG files. The default is `TRUE`.
+#' @param output_dir Character scalar giving the directory where saved figures
+#'   are written. The default is `"outputs"`.
+#'
+#' @return `NULL`, returned invisibly.
+#'
+#' @details
+#' During interactive use, the function displays separate comparisons for the
+#' infection-age and healthcare-visit curves.
+#'
+#' When `save_plots = TRUE`, `output_dir` is created if necessary and the
+#' figures are written as `infection_age_curve.png` and
+#' `visit_age_curve.png`.
 plot_curve_recovery <- function(
     curve_results,
     save_plots = TRUE,
@@ -402,7 +398,7 @@ plot_curve_recovery <- function(
       ),
       main = "Estimated vs. true visit-age curve, c(a)",
       xlab = "Age in months",
-      ylab = "Probability of visit given infection"
+      ylab = "Healthcare-visit weight"
     )
     
     lines(
@@ -423,13 +419,13 @@ plot_curve_recovery <- function(
     )
   }
   
-  # Display the plots during interactive use.
+  # Display plots in interactive sessions.
   if (interactive()) {
     draw_w_plot()
     draw_c_plot()
   }
   
-  # Save the plots for reproducible terminal and interactive runs.
+  # Save plots when requested, creating the output directory if needed.
   if (save_plots) {
     dir.create(
       output_dir,
