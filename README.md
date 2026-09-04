@@ -152,7 +152,8 @@ When `save_plots = TRUE`, the following recovery figures are written to the `out
 ```text
 .
 ├── README.md
-├── run_example.R
+├── example/
+│   └── run_example.R
 ├── R/
 │   ├── model_setup.R
 │   ├── probability_core.R
@@ -165,8 +166,8 @@ When `save_plots = TRUE`, the following recovery figures are written to the `out
 └── docs/
     ├── technical_walkthrough.md
     └── images/
-        ├── infection_curve_recovery.png
-        └── visit_curve_recovery.png
+        ├── first_infection_curve_comparison.png
+        └── healthcare_visit_curve_comparison.png
 ```
 
 ### Main components
@@ -192,7 +193,7 @@ When `save_plots = TRUE`, the following recovery figures are written to the `out
 * **`R/diagnostics.R`**
   Provides subject-level summaries, infection-probability calculations, and comparison plots for the simulation and recovery workflow.
 
-* **`inputs/`**
+* **`data/`**
   Stores the fixed seasonal circulation and curve-scaling inputs used by the reference example.
 
 * **`outputs/`**
